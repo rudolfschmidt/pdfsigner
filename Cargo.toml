@@ -1,0 +1,32 @@
+[package]
+name = "pdfsigner"
+version = "0.1.0"
+edition = "2024"
+authors = ["Rudolf Schmidt <info@rudolfschmidt.com>"]
+description = "Fast, minimal desktop PDF signer: drop a PDF, place signature image and text overlays, save."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/rudolfschmidt/pdfsigner"
+homepage = "https://github.com/rudolfschmidt/pdfsigner"
+keywords = ["pdf", "signature", "annotation", "gui", "editor"]
+categories = ["gui"]
+include = [
+    "src/**/*",
+    "fonts/Inter-Regular.ttf",
+    "fonts/Inter-LICENSE.txt",
+    "Cargo.toml",
+    "LICENSE",
+]
+
+[dependencies]
+eframe = "0.29"
+pdfium-render = "0.8"
+lopdf = "0.40"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+flate2 = "1.1"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ttf-parser = "0.25"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
