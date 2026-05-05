@@ -1,18 +1,17 @@
-//! Discovery of signature images from `~/.config/pdfsigner/signatures`.
+//! Discovery of signature images. The directory comes from the
+//! `PDFSIGNER_SIGNATURES` environment variable; if it isn't set, the
+//! signature menu is simply empty (no config file).
 
 use std::path::PathBuf;
 
-const DIR: &str = ".config/pdfsigner/signatures";
+const ENV_VAR: &str = "PDFSIGNER_SIGNATURES";
 
-fn signatures_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(DIR))
-}
-
-/// PNG/JPG/JPEG files in the signatures dir, sorted by name. Creates the
-/// directory if it doesn't exist; returns empty on any failure.
+/// PNG/JPG/JPEG files in `$PDFSIGNER_SIGNATURES`, sorted by name. Returns an
+/// empty `Vec` if the env var is unset or the directory is missing/empty.
 pub fn list_signatures() -> Vec<PathBuf> {
-    let Some(dir) = signatures_dir() else { return vec![] };
-    let _ = std::fs::create_dir_all(&dir);
+    let Some(dir) = std::env::var_os(ENV_VAR).map(PathBuf::from) else {
+        return vec![];
+    };
     let mut out = vec![];
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {

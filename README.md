@@ -97,11 +97,12 @@ cargo build --release
 ./target/release/pdfsigner some.pdf
 ```
 
-A wrapper script for convenience (`~/bin/pdfsigner`):
+A wrapper script for convenience (e.g. `~/bin/pdfsigner`):
 
 ```bash
 #!/usr/bin/env bash
-exec ~/dev/github/pdfsigner/target/release/pdfsigner "$@"
+export PDFSIGNER_SIGNATURES="$HOME/path/to/your/signatures"
+exec /path/to/pdfsigner-checkout/target/release/pdfsigner "$@"
 ```
 
 ## Usage
@@ -181,9 +182,12 @@ then `_2.pdf`, etc. The original PDF is never touched.
 
 ### Signatures directory
 
-`~/.config/pdfsigner/signatures/` is created on first launch. Drop your
-signature PNG or JPG files there and they appear in the right-click menu
-the next time you start the app. Only one level deep; no recursion.
+Set the `PDFSIGNER_SIGNATURES` environment variable to a directory of
+signature images. Every PNG/JPG/JPEG file directly in that directory shows
+up in the right-click menu over the page. No recursion; no config file.
+
+If the variable is unset, the right-click menu is empty (fall back to
+typing dates with `s`/`Shift+S` and an `x` mark with `x`).
 
 For transparency, use a PNG with an alpha channel — the embedder writes a
 soft mask so the signature blends with whatever is underneath in the PDF.
