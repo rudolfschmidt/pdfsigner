@@ -122,7 +122,7 @@ pdfsigner contract.pdf
 | `x`            | Insert literal `x` at the cursor (for checkboxes)              |
 | `t`            | Spawn an empty text label at the cursor and enter inline edit  |
 | `d`            | Delete the current selection                                   |
-| `Del` / `BkSp` | Delete the current selection                                   |
+| `Del` / `Backspace` | Delete the current selection                              |
 | `c`            | Toggle a colour picker for the selected text overlay(s)        |
 | `+` / `-`      | Resize selection — text in pt-steps, images proportionally     |
 | `Ctrl+S`       | Save the signed PDF                                            |
