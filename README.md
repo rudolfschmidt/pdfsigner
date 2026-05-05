@@ -3,6 +3,9 @@
 A minimal desktop PDF signer for Linux. Drop a PDF, place a signature image
 and a date, save. Single binary, no cloud, no account, no proprietary stack.
 
+The UI follows a zathura/feh-style aesthetic: black bars, monospace text,
+keyboard- and mouse-driven, no toolbar buttons cluttering the document area.
+
 ## Why
 
 I needed a fast way to sign and date PDFs locally without launching a heavy
@@ -30,18 +33,22 @@ signature image, type the date, drag both into position, save. That's it.
 - Opens existing PDFs without rasterizing them — original text and structure
   stay intact, the signature/date are added as a true overlay layer
 - Inserts signature images (PNG/JPG with transparency) from a configurable
-  signatures directory
-- Inserts text labels with the bundled Inter font, pickable color and size
-- Quick-insert buttons for today's date in German (`04.05.2026`) and US
-  (`05/04/2026`) format, plus an `X` button for checkboxes
-- Edit text content of existing labels in-place
+  signatures directory via right-click menu (feh-style)
+- Inserts text labels with the bundled Inter font, in three preset colours
+  (black, red, blue) or any custom HSV-picked colour
+- Inline text editor: press `t` over the page → type directly into the
+  spawned label, like Xournal++
+- Quick date stamps: `s` for German (`04.05.2026`), `Shift+S` for US
+  (`05/04/2026`), `x` for an `X` checkbox mark
 - Multi-selection via rubber-band drag (or Ctrl+click), bulk move and
   bulk delete
+- Resize selection with `+`/`-` or mouse wheel (text in pt-steps, images
+  proportionally)
 - Saves the result next to the original as `<name>_signed.pdf`
   (auto-numbered if the file exists)
-- Optional page-range filter at save time (`1-3,5,7-9`) to extract only
+- Optional page-range filter (`1-3,5,7-9`) at save time to extract only
   selected pages into the signed output
-- Mouse-wheel page navigation
+- Mouse-wheel page navigation (when nothing is selected)
 - Recovery path for malformed PDFs: if `lopdf` can't parse the input
   (broken xref, compressed object streams, incremental updates), the file
   is round-tripped through `pdfium` to normalize the structure before
@@ -106,33 +113,63 @@ the window:
 pdfsigner contract.pdf
 ```
 
-### Toolbar
+### Hotkeys (over the page area)
 
-- **Insert signature** — dropdown of files from
-  `~/.config/pdfsigner/signatures/`. Selecting an entry inserts it onto the
-  current page.
-- **DE** / **US** — insert today's date in the chosen format
-- **X** — insert an "X" character (for ticking checkboxes)
-- **Text** field + **Add** — insert a custom text label. While a text label
-  is selected the field switches to editing that label's content.
-- **Size**, **color** — applied to the next-inserted text or to the
-  currently-selected text label
-- **Width** — appears when an image is selected, scales it preserving aspect
-  ratio
-- **Pages** — page-range filter (e.g. `1-3,5`); empty means save all pages
-- **Save** (or Ctrl+S) — writes `<name>_signed.pdf` next to the original
+| Key            | Action                                                         |
+|----------------|----------------------------------------------------------------|
+| `s`            | Stamp today's date in DE format (`DD.MM.YYYY`) at the cursor   |
+| `Shift+S`      | Stamp today's date in US format (`MM/DD/YYYY`) at the cursor   |
+| `x`            | Insert literal `x` at the cursor (for checkboxes)              |
+| `t`            | Spawn an empty text label at the cursor and enter inline edit  |
+| `d`            | Delete the current selection                                   |
+| `Del` / `BkSp` | Delete the current selection                                   |
+| `c`            | Toggle a colour picker for the selected text overlay(s)        |
+| `+` / `-`      | Resize selection — text in pt-steps, images proportionally     |
+| `Ctrl+S`       | Save the signed PDF                                            |
+| `Ctrl+D`       | Duplicate the current selection (offset slightly)              |
 
-### Selection and movement
+Stamps and `x` are placed with the cursor at the label's bottom-left
+corner; `t` puts the cursor in inline-edit mode (Enter for a newline,
+Esc or Shift+Enter to finish, empty text removes the label).
 
-- Click an overlay to select it
-- Ctrl+click adds/removes from the selection
-- Drag from empty space to draw a rubber-band rectangle and select all
-  overlays inside it
-- Drag a selected overlay to move it; if multiple are selected they all move
-  together
-- Delete (or Backspace) removes all selected overlays
-- Ctrl+D duplicates all selected overlays at a small offset
-- Mouse wheel changes page (one notch = one page)
+### Mouse
+
+- **Left-click an overlay** — select it. On a text overlay this also
+  enters inline-edit mode.
+- **Ctrl+left-click** — toggle that overlay in the multi-selection.
+- **Left-drag from empty space** — rubber-band rectangle to select all
+  overlays inside.
+- **Left-drag a selected overlay** — move it (multi-selection moves
+  together).
+- **Right-press over the page** — opens the signature menu (feh-style:
+  hold the right button, drag to a menu entry, release). The signature
+  is inserted at the original right-press position, centred on the cursor.
+- **Mouse wheel** — with a selection, resizes it; without, paginates the
+  document.
+
+### Colour picker
+
+Press `c` while a text overlay is selected. The popup has three preset
+colours plus a `Custom…` entry that opens a full HSV picker. Live-applies
+to all selected text overlays as you drag the picker.
+
+### Header
+
+The header is a thin black bar with monospace 12pt text:
+
+- **Left**: current label size in pt (only while a text overlay is
+  selected or being edited), plus a `N selected` indicator for
+  multi-selection.
+- **Right**: page-range filter input. Type something like `1-3,5` to
+  restrict the saved PDF to those pages; leave empty for all pages.
+
+### Footer
+
+Zathura-style modeline:
+
+- **Left**: full path of the current PDF.
+- **Centre/right**: status messages (errors in red).
+- **Far right**: `[current/total]` page indicator.
 
 ### Output naming
 
@@ -145,7 +182,7 @@ then `_2.pdf`, etc. The original PDF is never touched.
 ### Signatures directory
 
 `~/.config/pdfsigner/signatures/` is created on first launch. Drop your
-signature PNG or JPG files there and they appear in the toolbar dropdown
+signature PNG or JPG files there and they appear in the right-click menu
 the next time you start the app. Only one level deep; no recursion.
 
 For transparency, use a PNG with an alpha channel — the embedder writes a
@@ -154,8 +191,7 @@ soft mask so the signature blends with whatever is underneath in the PDF.
 ### Fonts
 
 Inter Regular is bundled into the binary, no additional installation needed.
-Bold/italic are not bundled (the toggle was removed because they would
-not visibly differ).
+Bold/italic are not bundled.
 
 ## Privacy notes
 
@@ -184,18 +220,32 @@ or open the file in a metadata-aware tool first.
 
 ## Architecture
 
-A single Rust binary, ~1000 lines:
+A single Rust binary split into seven small modules (~2k LOC total):
 
-- **eframe / egui** — immediate-mode UI rendered via OpenGL, no system GUI
-  toolkit dependency
+- `main.rs` — App state, lifecycle, event dispatch, panel rendering
+- `pdf.rs`  — pdfium loading + lopdf save flow, Inter-font embedding,
+  image embedding, page-range parsing
+- `menus.rs`— sig menu, preset colour menu, custom HSV picker (all
+  rendered as foreground `egui::Area` popups)
+- `editor.rs` — inline `TextEdit` with a per-glyph layouter that
+  re-colours the selected character range
+- `overlay.rs` — `Overlay` enum, geometry helpers (rect, hit-test),
+  cursor-range / char→byte helpers, the shared selection-layouter
+- `theme.rs` — colour constants and `apply_global` / `apply_header` /
+  `apply_popup` style helpers
+- `signatures.rs` — signature-image discovery
+
+Underlying crates:
+
+- **eframe / egui** — immediate-mode UI rendered via OpenGL, no system
+  GUI toolkit dependency
 - **pdfium-render** — PDF rendering for the editor view and structural
   normalization fallback
-- **lopdf** — PDF object/stream construction for the overlay layer (text,
-  images, fonts)
+- **lopdf** — PDF object/stream construction for the overlay layer
 - **ttf-parser** — read Inter's TrueType metrics for embedding as a Type0
   CIDFontType2 PDF font
 - **image** + **flate2** — image decoding and PDF stream compression
-- **chrono** — date formatting for the quick-insert buttons
+- **chrono** — date formatting for the date stamps
 
 Save flow: load original via `lopdf`. If that fails, round-trip through
 pdfium (decompresses cross-reference streams and object streams to a form
@@ -204,7 +254,8 @@ content stream, sandwiched between `q ... Q` so any non-identity CTM left
 by the original content does not leak into the overlay (which would
 otherwise mirror or displace the additions). Embed Inter once per saved
 file as a Type0 font with Identity-H encoding and full glyph-width table.
-Save under a non-conflicting name.
+Resource names (`/F1`, `/Im1`, …) are picked to avoid collisions with the
+source PDF's existing resources. Save under a non-conflicting name.
 
 ## Known limitations
 
