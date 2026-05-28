@@ -9,7 +9,6 @@
 use eframe::egui;
 
 use crate::overlay::{overlay_rect, selection_layouter, Overlay};
-use crate::theme::ACCENT;
 use crate::App;
 
 pub fn render_inline_editor(
@@ -56,7 +55,10 @@ pub fn render_inline_editor(
         };
         let edit_rect = overlay_rect(&preview, page_rect, scale, ctx);
 
-        let mut layouter = selection_layouter(cached_range, font.clone(), regular, ACCENT);
+        // Selected glyphs render white so they stay readable on the red
+        // selection bg.
+        let mut layouter =
+            selection_layouter(cached_range, font.clone(), regular, egui::Color32::WHITE);
 
         let mut child_ui = ui.new_child(
             egui::UiBuilder::new()

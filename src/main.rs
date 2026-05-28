@@ -403,6 +403,10 @@ impl App {
             if pressed(egui::Key::Delete) || pressed(egui::Key::Backspace) {
                 self.delete_selected();
             }
+            // Zathura-style quit.
+            if pressed(egui::Key::Q) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             // +/- adjust size (selection if any, else the default for new text).
             let dir = ctx.input(|i| {
                 let mut d = 0.0_f32;
