@@ -197,6 +197,92 @@ pub fn render_color_custom(app: &mut App, ctx: &egui::Context) {
 }
 
 // ----------------------------------------------------------------------------
+// Help cheat-sheet (toggled by `h`) — a centred, static hotkey list
+// ----------------------------------------------------------------------------
+
+/// One cheat-sheet row: the key combo and what it does.
+struct HelpRow {
+    keys: &'static str,
+    desc: &'static str,
+}
+
+pub fn render_help(app: &mut App, ctx: &egui::Context) {
+    if !app.help_open {
+        return;
+    }
+
+    let sections: [(&str, &[HelpRow]); 3] = [
+        (
+            "place (cursor over page)",
+            &[
+                HelpRow { keys: "s",          desc: "stamp date · DD.MM.YYYY" },
+                HelpRow { keys: "Shift+S",    desc: "stamp date · MM/DD/YYYY" },
+                HelpRow { keys: "x",          desc: "checkbox mark" },
+                HelpRow { keys: "t",          desc: "text label (inline edit)" },
+                HelpRow { keys: "right-drag", desc: "signature menu" },
+            ],
+        ),
+        (
+            "selection",
+            &[
+                HelpRow { keys: "d / Del",  desc: "delete" },
+                HelpRow { keys: "Ctrl+D",   desc: "duplicate" },
+                HelpRow { keys: "+ / -",    desc: "resize · text pt, image %" },
+                HelpRow { keys: "wheel",    desc: "resize sel, else paginate" },
+                HelpRow { keys: "c",        desc: "colour picker" },
+            ],
+        ),
+        (
+            "file",
+            &[
+                HelpRow { keys: "Ctrl+S",   desc: "save signed PDF" },
+                HelpRow { keys: "q",        desc: "quit" },
+                HelpRow { keys: "h / Esc",  desc: "close this help" },
+            ],
+        ),
+    ];
+
+    let font = theme::bar_font();
+    egui::Area::new(egui::Id::new("help_overlay"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            // White-on-black, matching the zathura/feh bars.
+            egui::Frame::none()
+                .fill(egui::Color32::BLACK)
+                .stroke(egui::Stroke::new(1.0, egui::Color32::WHITE))
+                .inner_margin(14.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("hotkeys")
+                            .font(font.clone())
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                    );
+                    ui.add_space(8.0);
+                    for (title, rows) in &sections {
+                        ui.label(
+                            egui::RichText::new(*title)
+                                .font(font.clone())
+                                .color(theme::PLACEHOLDER_GRAY),
+                        );
+                        egui::Grid::new(*title)
+                            .num_columns(2)
+                            .spacing(egui::vec2(16.0, 2.0))
+                            .show(ui, |ui| {
+                                for row in *rows {
+                                    ui.label(egui::RichText::new(row.keys).font(font.clone()).color(egui::Color32::WHITE));
+                                    ui.label(egui::RichText::new(row.desc).font(font.clone()).color(egui::Color32::WHITE));
+                                    ui.end_row();
+                                }
+                            });
+                        ui.add_space(8.0);
+                    }
+                });
+        });
+}
+
+// ----------------------------------------------------------------------------
 // Internal helpers
 // ----------------------------------------------------------------------------
 

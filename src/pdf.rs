@@ -18,10 +18,7 @@ use crate::overlay::Overlay;
 // Bundled font + render parameters
 // ----------------------------------------------------------------------------
 
-const INTER_TTF: &[u8] = include_bytes!("../fonts/Inter-Regular.ttf");
-/// Inter-Regular cap-height as a fraction of font size (used to position the
-/// PDF text-baseline so saved output lines up with the on-screen preview).
-const INTER_ASCENT: f32 = 0.728;
+pub(crate) const INTER_TTF: &[u8] = include_bytes!("../fonts/Inter-Regular.ttf");
 
 const RENDER_WIDTH: u32 = 1800;
 const RENDER_MAX_HEIGHT: u32 = 2400;
@@ -178,21 +175,31 @@ fn write_overlays_for_page(
             }
             Overlay::Text { text, x, y, size_pt, color } => {
                 text_used = true;
-                let baseline = y + size_pt * INTER_ASCENT;
+                // First line's baseline; further lines advance by the leading
+                // (`TL` + `T*`) so multi-line text wraps exactly as the egui
+                // preview lays it out.
+                let baseline = y + size_pt * crate::theme::INTER_BASELINE_RATIO;
                 let pdf_y = page_h_pt - baseline;
+                let leading = size_pt * crate::theme::INTER_LINE_HEIGHT_RATIO;
                 let r = color[0] as f32 / 255.0;
                 let g = color[1] as f32 / 255.0;
                 let b = color[2] as f32 / 255.0;
                 content.extend_from_slice(
                     format!(
-                        "BT\n/{} {:.4} Tf\n{:.4} {:.4} {:.4} rg\n{:.4} {:.4} Td\n",
-                        font_name, size_pt, r, g, b, x, pdf_y
+                        "BT\n/{} {:.4} Tf\n{:.4} TL\n{:.4} {:.4} {:.4} rg\n{:.4} {:.4} Td\n",
+                        font_name, size_pt, leading, r, g, b, x, pdf_y
                     )
                     .as_bytes(),
                 );
-                content.extend_from_slice(b"<");
-                content.extend_from_slice(encode_text_for_inter(text).as_bytes());
-                content.extend_from_slice(b"> Tj\nET\n");
+                for (li, line) in text.split('\n').enumerate() {
+                    if li > 0 {
+                        content.extend_from_slice(b"T*\n");
+                    }
+                    content.extend_from_slice(b"<");
+                    content.extend_from_slice(encode_text_for_inter(line).as_bytes());
+                    content.extend_from_slice(b"> Tj\n");
+                }
+                content.extend_from_slice(b"ET\n");
             }
         }
     }
@@ -505,4 +512,174 @@ fn add_page_resource(
         .as_dict_mut()?
         .set("Resources", Object::Dictionary(resources));
     Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// Tests
+// ----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a minimal blank A4 page via lopdf so the tests are self-contained
+    /// (no external `gs`/fixture needed — only pdfium for rendering).
+    fn make_blank_a4(path: &Path) {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        doc.save(path).unwrap();
+    }
+
+    /// End-to-end baseline check: stamp all-caps text (no descenders) at a
+    /// known top-edge position onto a blank A4, render the saved PDF, and read
+    /// the bottom of the dark pixels — that bottom edge is the glyph baseline,
+    /// and it must equal `y + size * INTER_BASELINE_RATIO` (the same formula
+    /// the preview uses to draw the egui galley). Skips if pdfium is missing.
+    #[test]
+    fn saved_text_lands_on_preview_baseline() {
+        let Some(pdfium) = try_pdfium() else {
+            eprintln!("skip: pdfium not available");
+            return;
+        };
+        let blank = Path::new("target/testdata/blank_baseline.pdf");
+        make_blank_a4(blank);
+
+        const X: f32 = 200.0;
+        const Y_TOP: f32 = 100.0;
+        const SIZE: f32 = 60.0;
+        let page = load_pages(&pdfium, blank).unwrap().remove(0);
+        let (pw, ph) = page.size_pt;
+
+        let overlays = vec![vec![Overlay::Text {
+            text: "BASELINE".to_owned(),
+            x: X,
+            y: Y_TOP,
+            size_pt: SIZE,
+            color: [0, 0, 0],
+        }]];
+        let out = save(Some(&pdfium), blank, &overlays, &[(pw, ph)], "").unwrap();
+
+        // Render the saved page at ~1px per point.
+        let doc = pdfium.load_pdf_from_file(out.to_str().unwrap(), None).unwrap();
+        let cfg = PdfRenderConfig::new().set_target_width(pw as i32);
+        let pages = doc.pages();
+        let page0 = pages.iter().next().unwrap();
+        let bmp = page0.render_with_config(&cfg).unwrap();
+        let img = bmp.as_image().to_luma8();
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+
+        // Bounding box of dark (text) pixels.
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (f32::MAX, 0.0_f32, f32::MAX, 0.0_f32);
+        for (px, py, p) in img.enumerate_pixels() {
+            if p.0[0] < 128 {
+                min_x = min_x.min(px as f32);
+                max_x = max_x.max(px as f32);
+                min_y = min_y.min(py as f32);
+                max_y = max_y.max(py as f32);
+            }
+        }
+        assert!(max_x > 0.0, "no text rendered in saved PDF");
+
+        // Pixel → point (top-down).
+        let to_pt_x = |px: f32| px * pw / iw;
+        let to_pt_y = |py: f32| py * ph / ih;
+        let left_pt = to_pt_x(min_x);
+        let cap_top_pt = to_pt_y(min_y);
+        let baseline_pt = to_pt_y(max_y);
+        let expected_baseline = Y_TOP + SIZE * crate::theme::INTER_BASELINE_RATIO;
+
+        eprintln!(
+            "left={left_pt:.1} (exp ~{X}), cap_top={cap_top_pt:.1}, baseline={baseline_pt:.1} (exp ~{expected_baseline:.1})"
+        );
+        // Left edge of the glyphs sits at the overlay x (Inter has a small left
+        // side bearing, so allow a few points of slack).
+        assert!((left_pt - X).abs() < 8.0, "left edge {left_pt:.1} != {X}");
+        // Baseline (bottom of caps) matches the preview formula within a couple
+        // of points (rasterisation + antialias fringe).
+        assert!(
+            (baseline_pt - expected_baseline).abs() < 3.0,
+            "baseline {baseline_pt:.1} != expected {expected_baseline:.1}"
+        );
+
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// Multi-line overlay text must wrap in the saved PDF (it used to collapse
+    /// onto one line because `\n` encoded as the notdef glyph). Stamp two
+    /// lines, render, and confirm two distinct dark bands spaced one line-
+    /// height apart.
+    #[test]
+    fn saved_multiline_text_wraps() {
+        let Some(pdfium) = try_pdfium() else { return };
+        let blank = Path::new("target/testdata/blank_multiline.pdf");
+        make_blank_a4(blank);
+
+        const SIZE: f32 = 60.0;
+        let page = load_pages(&pdfium, blank).unwrap().remove(0);
+        let (pw, ph) = page.size_pt;
+        let overlays = vec![vec![Overlay::Text {
+            text: "HH\nHH".to_owned(),
+            x: 150.0,
+            y: 100.0,
+            size_pt: SIZE,
+            color: [0, 0, 0],
+        }]];
+        let out = save(Some(&pdfium), blank, &overlays, &[(pw, ph)], "").unwrap();
+
+        let doc = pdfium.load_pdf_from_file(out.to_str().unwrap(), None).unwrap();
+        let cfg = PdfRenderConfig::new().set_target_width(pw as i32);
+        let pages = doc.pages();
+        let page0 = pages.iter().next().unwrap();
+        let bmp = page0.render_with_config(&cfg).unwrap();
+        let img = bmp.as_image().to_luma8();
+        let (iw, ih) = (img.width(), img.height());
+
+        // Group rows that contain dark pixels into contiguous vertical bands.
+        let mut bands: Vec<(u32, u32)> = vec![];
+        let mut in_band = false;
+        for y in 0..ih {
+            let dark = (0..iw).any(|x| img.get_pixel(x, y).0[0] < 128);
+            match (dark, in_band) {
+                (true, false) => {
+                    bands.push((y, y));
+                    in_band = true;
+                }
+                (true, true) => bands.last_mut().unwrap().1 = y,
+                (false, _) => in_band = false,
+            }
+        }
+
+        assert_eq!(bands.len(), 2, "expected 2 text lines, got bands {bands:?}");
+        // Band centres should be ~one line-height (SIZE * ratio) apart.
+        let to_pt_y = |py: u32| py as f32 * ph / ih as f32;
+        let c0 = to_pt_y((bands[0].0 + bands[0].1) / 2);
+        let c1 = to_pt_y((bands[1].0 + bands[1].1) / 2);
+        let gap = c1 - c0;
+        let expected = SIZE * crate::theme::INTER_LINE_HEIGHT_RATIO;
+        eprintln!("line gap = {gap:.1} pt (expected ~{expected:.1})");
+        assert!((gap - expected).abs() < 4.0, "line gap {gap:.1} != {expected:.1}");
+
+        let _ = std::fs::remove_file(&out);
+    }
 }

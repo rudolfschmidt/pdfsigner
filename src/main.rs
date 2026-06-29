@@ -45,7 +45,8 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "pdfsigner",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            theme::install_fonts(&cc.egui_ctx);
             let mut app = App::new();
             if let Some(p) = cli_pdf
                 && let Err(e) = app.open_pdf(p) {
@@ -112,6 +113,9 @@ pub struct App {
     pub(crate) color_menu: Option<egui::Pos2>,
     pub(crate) color_menu_consume_click: bool,
     pub(crate) color_custom: Option<egui::Pos2>,
+
+    // Hotkey cheat-sheet overlay (toggled by `h`; modal while open).
+    pub(crate) help_open: bool,
 }
 
 // ----------------------------------------------------------------------------
@@ -149,6 +153,7 @@ impl App {
             color_menu: None,
             color_menu_consume_click: false,
             color_custom: None,
+            help_open: false,
         }
     }
 
@@ -364,6 +369,7 @@ impl eframe::App for App {
         self.render_header(ctx);
         self.render_footer(ctx);
         self.render_central(ctx);
+        menus::render_help(self, ctx);
     }
 }
 
@@ -400,6 +406,17 @@ impl App {
         let typing = ctx.memory(|m| m.focused().is_some());
         if !typing {
             let pressed = |k: egui::Key| ctx.input(|i| i.key_pressed(k));
+            // `h` toggles the cheat-sheet. While it's open it captures input
+            // modally — `h`/`Esc`/`q` close it and nothing else fires.
+            if pressed(egui::Key::H) {
+                self.help_open = !self.help_open;
+            }
+            if self.help_open {
+                if pressed(egui::Key::Escape) || pressed(egui::Key::Q) {
+                    self.help_open = false;
+                }
+                return;
+            }
             if pressed(egui::Key::Delete) || pressed(egui::Key::Backspace) {
                 self.delete_selected();
             }
@@ -444,7 +461,7 @@ impl App {
     /// selection: accumulator-based page navigation using the unit-converted
     /// `raw_scroll_delta` (egui smooths this for us).
     fn handle_wheel(&mut self, ctx: &egui::Context) {
-        if self.pages.is_empty() {
+        if self.pages.is_empty() || self.help_open {
             return;
         }
         let (event_dy, raw_dy) = ctx.input(|i| {
@@ -676,7 +693,8 @@ impl App {
 
         // 4. Pointer (drag / click) — gated by open menus.
         let consume_click = std::mem::take(&mut self.color_menu_consume_click);
-        let block_primary = self.color_menu.is_some() || self.color_custom.is_some() || consume_click;
+        let block_primary =
+            self.color_menu.is_some() || self.color_custom.is_some() || consume_click || self.help_open;
         if !block_primary {
             self.handle_pointer(&response, ctx, page_rect, scale, &overlay_rects);
         }
@@ -688,7 +706,7 @@ impl App {
                 i.pointer.button_released(egui::PointerButton::Secondary),
             )
         });
-        if rclick_pressed && !self.signatures.is_empty()
+        if rclick_pressed && !self.signatures.is_empty() && !self.help_open
             && let Some(pos) = response.hover_pos()
                 && page_rect.contains(pos) {
                     self.sig_menu = Some(pos);
@@ -702,7 +720,7 @@ impl App {
 
         // 7. Mouse-anchored hotkeys (s/S/x/t/d/c). Skipped while typing.
         let typing = ctx.memory(|m| m.focused().is_some());
-        if !typing {
+        if !typing && !self.help_open {
             self.handle_page_hotkeys(ctx, &response, page_rect, scale, size_pt);
         }
     }

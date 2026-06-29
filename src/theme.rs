@@ -4,6 +4,35 @@
 
 use eframe::egui;
 
+/// Top-of-text → baseline distance as a fraction of font size, for Inter
+/// laid out by egui via `FontId::proportional`. egui places a galley's
+/// baseline `font_ascent` points below the top edge, and `painter.text` with
+/// `Align2::LEFT_TOP` pins that top edge to the draw position; the PDF writer
+/// reuses this ratio so saved text sits exactly where the preview shows it.
+/// Measured empirically — see the `inter_baseline_ratio` test below.
+pub const INTER_BASELINE_RATIO: f32 = 0.969;
+
+/// Line-to-line advance as a fraction of font size, for Inter laid out by
+/// egui. Multi-line overlay text wraps at this pitch in the preview, so the
+/// PDF writer advances each line by the same amount. Measured empirically.
+pub const INTER_LINE_HEIGHT_RATIO: f32 = 1.21;
+
+/// Register the bundled Inter font as egui's proportional family so the
+/// on-screen overlay text matches the glyphs the PDF writer embeds. Bars stay
+/// on the default monospace font (they use `FontId::monospace`).
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .font_data
+        .insert("Inter".to_owned(), egui::FontData::from_static(crate::pdf::INTER_TTF));
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "Inter".to_owned());
+    ctx.set_fonts(fonts);
+}
+
 // Body accent — selection outline, body cursor, body selection bg.
 pub const ACCENT: egui::Color32 = egui::Color32::from_rgb(220, 80, 80);
 
@@ -78,4 +107,37 @@ pub fn apply_popup(style: &mut egui::Style) {
     style.visuals.widgets.active = flat;
     style.visuals.extreme_bg_color = egui::Color32::WHITE;
     style.visuals.selection.stroke = black_border;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies `INTER_BASELINE_RATIO` against egui's actual layout: lay out a
+    /// large Inter galley and read the baseline (`glyph.pos.y`) of the first
+    /// row. Measuring at a big size keeps egui's pixel-rounding negligible.
+    #[test]
+    fn inter_baseline_ratio() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        // Run one empty frame so `set_fonts` takes effect.
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        const SIZE: f32 = 1000.0;
+        let galley = ctx.fonts(|f| {
+            f.layout_no_wrap("Hg".to_owned(), egui::FontId::proportional(SIZE), egui::Color32::BLACK)
+        });
+        let baseline = galley.rows[0].glyphs[0].pos.y;
+        let ratio = baseline / SIZE;
+        let line_ratio = ctx.fonts(|f| f.row_height(&egui::FontId::proportional(SIZE))) / SIZE;
+        println!("measured INTER_BASELINE_RATIO   = {ratio:.6}");
+        println!("measured INTER_LINE_HEIGHT_RATIO = {line_ratio:.6}");
+        assert!(
+            (ratio - INTER_BASELINE_RATIO).abs() < 0.002,
+            "INTER_BASELINE_RATIO is {INTER_BASELINE_RATIO} but egui lays Inter out at {ratio}"
+        );
+        assert!(
+            (line_ratio - INTER_LINE_HEIGHT_RATIO).abs() < 0.01,
+            "INTER_LINE_HEIGHT_RATIO is {INTER_LINE_HEIGHT_RATIO} but egui uses {line_ratio}"
+        );
+    }
 }

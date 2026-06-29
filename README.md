@@ -49,6 +49,8 @@ signature image, type the date, drag both into position, save. That's it.
 - Optional page-range filter (`1-3,5,7-9`) at save time to extract only
   selected pages into the signed output
 - Mouse-wheel page navigation (when nothing is selected)
+- Built-in hotkey cheat-sheet: press `h` for a white-on-black overlay that
+  lists every shortcut
 - Recovery path for malformed PDFs: if `lopdf` can't parse the input
   (broken xref, compressed object streams, incremental updates), the file
   is round-tripped through `pdfium` to normalize the structure before
@@ -128,6 +130,11 @@ pdfsigner contract.pdf
 | `+` / `-`      | Resize selection — text in pt-steps, images proportionally     |
 | `Ctrl+S`       | Save the signed PDF                                            |
 | `Ctrl+D`       | Duplicate the current selection (offset slightly)              |
+| `h`            | Toggle a white-on-black cheat-sheet of the hotkeys             |
+| `q`            | Quit                                                          |
+
+The `h` overlay is a centred white-on-black panel listing every combo. It's
+modal: while open, `h`/`Esc`/`q` close it and other keys are ignored.
 
 Stamps and `x` are placed with the cursor at the label's bottom-left
 corner; `t` puts the cursor in inline-edit mode (Enter for a newline,
