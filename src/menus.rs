@@ -11,6 +11,7 @@
 
 use eframe::egui;
 
+use crate::overlay::{color_from_rgb, screen_to_pdf};
 use crate::theme;
 use crate::App;
 
@@ -86,8 +87,7 @@ pub fn render_sig_menu(
             && let Some(path) = app.signatures.get(idx).cloned() {
                 // Insert at the original right-click position, not where the
                 // user dragged to pick the menu entry.
-                let pdf_x = (menu_pos.x - page_rect.min.x) / scale;
-                let pdf_y = (menu_pos.y - page_rect.min.y) / scale;
+                let (pdf_x, pdf_y) = screen_to_pdf(menu_pos, page_rect, scale);
                 app.add_signature_at(path, pdf_x, pdf_y);
             }
         app.sig_menu = None;
@@ -128,7 +128,7 @@ pub fn render_color_menu(app: &mut App, ctx: &egui::Context) {
                 row.left_top() + egui::vec2(ROW_PAD_X, (ITEM_H - SWATCH_H) / 2.0),
                 egui::vec2(SWATCH_W, SWATCH_H),
             );
-            painter.rect_filled(swatch_rect, 0.0, egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+            painter.rect_filled(swatch_rect, 0.0, color_from_rgb(*rgb));
             painter.rect_stroke(swatch_rect, 0.0, egui::Stroke::new(1.0, fg));
         }
         painter.text(
@@ -165,7 +165,7 @@ pub fn render_color_custom(app: &mut App, ctx: &egui::Context) {
     let Some(custom_pos) = app.color_custom else { return };
 
     let init = app.first_selected_text_color().unwrap_or(app.text_color);
-    let mut current = egui::Color32::from_rgb(init[0], init[1], init[2]);
+    let mut current = color_from_rgb(init);
     let mut changed = false;
 
     let area = egui::Area::new(egui::Id::new("color_custom_picker"))

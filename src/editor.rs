@@ -8,7 +8,7 @@
 
 use eframe::egui;
 
-use crate::overlay::{overlay_rect, selection_layouter, Overlay};
+use crate::overlay::{color_from_rgb, overlay_rect, selection_layouter, Overlay};
 use crate::App;
 
 pub fn render_inline_editor(
@@ -39,9 +39,8 @@ pub fn render_inline_editor(
         let x_pt = *x;
         let y_pt = *y;
         let sz_pt = *size_pt;
-        let col = *color;
         let font = egui::FontId::proportional(sz_pt * scale);
-        let regular = egui::Color32::from_rgb(col[0], col[1], col[2]);
+        let regular = color_from_rgb(*color);
 
         // edit_rect mirrors overlay_rect so the selection outline (drawn in
         // the overlay loop above us) wraps the TextEdit identically to view
@@ -51,7 +50,7 @@ pub fn render_inline_editor(
             x: x_pt,
             y: y_pt,
             size_pt: sz_pt,
-            color: col,
+            color: *color,
         };
         let edit_rect = overlay_rect(&preview, page_rect, scale, ctx);
 

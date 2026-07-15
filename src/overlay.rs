@@ -13,7 +13,7 @@ pub enum Overlay {
     /// `pdftotext` can still extract them. Run `pdf.sanitize` afterwards for
     /// permanent redaction.
     Redact { x: f32, y: f32, w: f32, h: f32 },
-    /// Yellow half-transparent highlight awaiting commit — the user picked
+    /// Rose-tinted translucent highlight awaiting commit — the user picked
     /// this area in mark mode but hasn't turned it into a redaction yet.
     /// NOT persisted in the saved PDF (transient UI state).
     PendingMark { x: f32, y: f32, w: f32, h: f32 },
@@ -79,6 +79,16 @@ pub fn hit_test(rects: &[egui::Rect], pos: egui::Pos2) -> Option<usize> {
         .enumerate()
         .rev()
         .find_map(|(i, r)| r.contains(pos).then_some(i))
+}
+
+/// Screen pixel → PDF point (top-down), given the page rect and pt-to-px scale.
+pub fn screen_to_pdf(pos: egui::Pos2, page_rect: egui::Rect, scale: f32) -> (f32, f32) {
+    ((pos.x - page_rect.min.x) / scale, (pos.y - page_rect.min.y) / scale)
+}
+
+/// Build an opaque `Color32` from a stored `[R, G, B]` triple.
+pub fn color_from_rgb(rgb: [u8; 3]) -> egui::Color32 {
+    egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
 }
 
 /// Char-index span of a `CursorRange`, ordered (low, high). `None` for empty.

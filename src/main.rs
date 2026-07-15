@@ -16,7 +16,7 @@ mod pdf;
 mod signatures;
 mod theme;
 
-use crate::overlay::{hit_test, overlay_rect, selection_layouter, Overlay};
+use crate::overlay::{color_from_rgb, hit_test, overlay_rect, screen_to_pdf, selection_layouter, Overlay};
 
 // ----------------------------------------------------------------------------
 // Constants
@@ -118,10 +118,10 @@ pub struct App {
     pub(crate) help_open: bool,
 
     // Block mode: empty-space drags create black redaction rectangles.
-    // Toggled by `Shift+B`.
+    // Toggled by `b`.
     pub(crate) block_mode: bool,
-    // Mark mode: empty-space drags create yellow pending marks that the user
-    // later commits to black via `b`. Toggled by `m`.
+    // Mark mode: empty-space drags create rose-tinted pending marks that the
+    // user later commits to black via `b`. Toggled by `Shift+B`.
     pub(crate) mark_mode: bool,
     // Redact visibility toggle. Default true: Redacts render fully opaque
     // black (exactly like the saved file). Toggled by `r` — when off, they
@@ -207,7 +207,7 @@ impl App {
 impl App {
     /// Spawn a text overlay; returns its index in the current page. The
     /// overlay is auto-selected.
-    pub fn add_text_at(&mut self, text: String, pdf_x: f32, pdf_y: f32) -> usize {
+    pub(crate) fn add_text_at(&mut self, text: String, pdf_x: f32, pdf_y: f32) -> usize {
         let size = self.text_size;
         // Anchor the cursor position at the text baseline. For ascender-only
         // characters (x, digits, dates) the baseline is the visual bottom of
@@ -229,7 +229,7 @@ impl App {
 
     /// Spawn a signature image centred on `(pdf_x, pdf_y)`. Width is fixed
     /// at `DEFAULT_IMG_WIDTH_PT`; height keeps aspect ratio.
-    pub fn add_signature_at(&mut self, path: PathBuf, pdf_x: f32, pdf_y: f32) {
+    pub(crate) fn add_signature_at(&mut self, path: PathBuf, pdf_x: f32, pdf_y: f32) {
         let Some(img) = self.open_image_to_status(&path) else { return };
         let (iw, ih) = (img.width() as f32, img.height() as f32);
         let w = DEFAULT_IMG_WIDTH_PT;
@@ -296,7 +296,7 @@ impl App {
     /// `dir > 0` grows, `dir < 0` shrinks. Text is adjusted in pt-deltas;
     /// images by a constant geometric factor. With nothing selected the
     /// default text size for new spawns is adjusted instead.
-    pub fn adjust_size(&mut self, dir: f32) {
+    pub(crate) fn adjust_size(&mut self, dir: f32) {
         let cur = self.current;
         let mut applied = false;
         if let Some(page) = self.pages.get_mut(cur) {
@@ -329,7 +329,7 @@ impl App {
 
     /// Apply `color` to every selected overlay that is a text. Image
     /// overlays in the selection are left alone.
-    pub fn apply_color_to_selected_text(&mut self, color: [u8; 3]) {
+    pub(crate) fn apply_color_to_selected_text(&mut self, color: [u8; 3]) {
         let cur = self.current;
         for &i in &self.selected.clone() {
             if let Some(Overlay::Text { color: c, .. }) = self.pages[cur].overlays.get_mut(i) {
@@ -339,10 +339,13 @@ impl App {
     }
 
     /// Colour of the first selected text overlay, if any.
-    pub fn first_selected_text_color(&self) -> Option<[u8; 3]> {
-        self.selected.iter().find_map(|&i| match self.pages[self.current].overlays.get(i) {
-            Some(Overlay::Text { color, .. }) => Some(*color),
-            _ => None,
+    pub(crate) fn first_selected_text_color(&self) -> Option<[u8; 3]> {
+        self.selected.iter().find_map(|&i| {
+            if let Some(Overlay::Text { color, .. }) = self.pages[self.current].overlays.get(i) {
+                Some(*color)
+            } else {
+                None
+            }
         })
     }
 
@@ -540,16 +543,14 @@ impl App {
             .show(ctx, |ui| {
                 theme::apply_header(ui.style_mut());
                 let font = theme::bar_font();
-                let pt_text = self.active_text_idx().map(|idx| {
-                    let size = self.pages[self.current]
-                        .overlays
-                        .get(idx)
-                        .and_then(|o| match o {
-                            Overlay::Text { size_pt, .. } => Some(*size_pt),
-                            _ => None,
-                        })
-                        .unwrap_or(self.text_size);
-                    format!("{size:.0} pt")
+                let pt_text = self.active_text_idx().and_then(|idx| {
+                    if let Some(Overlay::Text { size_pt, .. }) =
+                        self.pages[self.current].overlays.get(idx)
+                    {
+                        Some(format!("{size_pt:.0} pt"))
+                    } else {
+                        None
+                    }
                 });
                 let sel_text =
                     (self.selected.len() > 1).then(|| format!("{} selected", self.selected.len()));
@@ -719,7 +720,7 @@ impl App {
         self.draw_overlays(&painter, &overlay_rects, scale);
 
         // 3. Marquee selection box (drawn on top of overlays). In block mode
-        // preview as semi-opaque black; in mark mode as translucent yellow.
+        // preview as semi-opaque black; in mark mode as translucent rose.
         if let Some(start) = self.rubber_band {
             let end = response.interact_pointer_pos().unwrap_or(start);
             let band = egui::Rect::from_two_pos(start, end);
@@ -766,7 +767,8 @@ impl App {
         // 6. Inline text editor (renders when `self.editing` is `Some`).
         editor::render_inline_editor(self, ctx, ui, page_rect, scale);
 
-        // 7. Mouse-anchored hotkeys (s/S/x/t/d/c). Skipped while typing.
+        // 7. Mouse-anchored hotkeys (s/Shift+S/x/t/d/c/b/Shift+B/r). Skipped
+        // while typing.
         let typing = ctx.memory(|m| m.focused().is_some());
         if !typing && !self.help_open {
             self.handle_page_hotkeys(ctx, &response, page_rect, scale, size_pt);
@@ -805,7 +807,7 @@ impl App {
                         egui::Align2::LEFT_TOP,
                         text,
                         egui::FontId::proportional(size_pt * scale),
-                        egui::Color32::from_rgb(color[0], color[1], color[2]),
+                        color_from_rgb(*color),
                     );
                 }
                 Overlay::Redact { .. } => {
@@ -873,9 +875,7 @@ impl App {
         if response.dragged() && !self.drag_offsets.is_empty()
             && let Some(pos) = response.interact_pointer_pos() {
                 for &(idx, off) in &self.drag_offsets {
-                    let new_top_left = pos - off;
-                    let pdf_x = (new_top_left.x - page_rect.min.x) / scale;
-                    let pdf_y = (new_top_left.y - page_rect.min.y) / scale;
+                    let (pdf_x, pdf_y) = screen_to_pdf(pos - off, page_rect, scale);
                     if let Some(o) = self.pages[cur].overlays.get_mut(idx) {
                         let (x, y) = o.position_mut();
                         *x = pdf_x;
@@ -971,8 +971,7 @@ impl App {
         size_pt: (f32, f32),
     ) {
         let Some(pos) = response.hover_pos() else { return };
-        let pdf_x = (pos.x - page_rect.min.x) / scale;
-        let pdf_y = (pos.y - page_rect.min.y) / scale;
+        let (pdf_x, pdf_y) = screen_to_pdf(pos, page_rect, scale);
         let in_page = (0.0..=size_pt.0).contains(&pdf_x) && (0.0..=size_pt.1).contains(&pdf_y);
         if !in_page {
             return;
@@ -1014,16 +1013,10 @@ impl App {
                     self.editing_just_focused = false;
                 }
                 egui::Key::D if !modifiers.shift => self.delete_selected(),
-                egui::Key::C if !modifiers.shift => {
-                    let has_text = self.selected.iter().any(|&i| {
-                        matches!(
-                            self.pages[cur].overlays.get(i),
-                            Some(Overlay::Text { .. })
-                        )
-                    });
-                    if has_text {
-                        self.color_menu = if self.color_menu.is_some() { None } else { Some(pos) };
-                    }
+                egui::Key::C if !modifiers.shift
+                    && self.first_selected_text_color().is_some() =>
+                {
+                    self.color_menu = if self.color_menu.is_some() { None } else { Some(pos) };
                 }
                 egui::Key::B if modifiers.shift && !self.block_mode => {
                     // Shift+B toggles mark mode. Ignored while block mode is
@@ -1147,11 +1140,7 @@ fn union_rect(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> (f32, f32, f3
 
 /// Screen-space band → PDF-space (x, y, w, h) tuple.
 fn pdf_coords_from_band(band: egui::Rect, page_rect: egui::Rect, scale: f32) -> (f32, f32, f32, f32) {
-    (
-        (band.min.x - page_rect.min.x) / scale,
-        (band.min.y - page_rect.min.y) / scale,
-        band.width() / scale,
-        band.height() / scale,
-    )
+    let (x, y) = screen_to_pdf(band.min, page_rect, scale);
+    (x, y, band.width() / scale, band.height() / scale)
 }
 

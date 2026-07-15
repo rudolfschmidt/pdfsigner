@@ -47,8 +47,7 @@ pub const ERROR_RED: egui::Color32 = egui::Color32::from_rgb(255, 60, 60);
 pub const PLACEHOLDER_GRAY: egui::Color32 = egui::Color32::from_gray(140);
 pub const SEPARATOR_DOT_GRAY: egui::Color32 = egui::Color32::from_gray(110);
 
-pub const BAR_FONT_SIZE: f32 = 12.0;
-pub const PANEL_MARGIN: egui::Margin = egui::Margin {
+const PANEL_MARGIN: egui::Margin = egui::Margin {
     left: 4.0,
     right: 4.0,
     top: 1.0,
@@ -56,7 +55,7 @@ pub const PANEL_MARGIN: egui::Margin = egui::Margin {
 };
 
 pub fn bar_font() -> egui::FontId {
-    egui::FontId::monospace(BAR_FONT_SIZE)
+    egui::FontId::monospace(12.0)
 }
 
 pub fn black_panel_frame() -> egui::Frame {

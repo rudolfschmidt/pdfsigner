@@ -404,7 +404,6 @@ fn parse_page_range(s: &str, total: usize) -> Vec<usize> {
             push_unique(&mut out, p);
         }
     }
-    out.sort_unstable();
     out
 }
 
