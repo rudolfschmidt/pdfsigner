@@ -40,6 +40,11 @@ signature image, type the date, drag both into position, save. That's it.
   spawned label, like Xournal++
 - Quick date stamps: `s` for German (`04.05.2026`), `Shift+S` for US
   (`05/04/2026`), `x` for an `X` checkbox mark
+- Redact / blacken areas: **block mode** (`b`) drags a solid black rectangle
+  over anything, **mark mode** (`Shift+B`) drags across text and pdfium
+  detects each covered word so the redaction hugs the glyphs — commit the
+  marks to redactions with `b`, toggle their visibility with `r` to peek at
+  the covered text
 - Multi-selection via rubber-band drag (or Ctrl+click), bulk move and
   bulk delete
 - Resize selection with `+`/`-` or mouse wheel (text in pt-steps, images
@@ -128,6 +133,11 @@ pdfsigner contract.pdf
 | `Del` / `Backspace` | Delete the current selection                              |
 | `c`            | Toggle a colour picker for the selected text overlay(s)        |
 | `+` / `-`      | Resize selection — text in pt-steps, images proportionally     |
+| `b`            | Toggle **block mode** — next drag paints a black rectangle     |
+| `Shift+B`      | Toggle **mark mode** — drag over text, pdfium marks each word  |
+| `b` (mark mode)| Commit pending marks into black redactions                     |
+| `r`            | Toggle redact visibility (peek at the covered text)            |
+| `Esc`          | Leave block / mark mode (pending marks are discarded)          |
 | `Ctrl+S`       | Save the signed PDF                                            |
 | `Ctrl+D`       | Duplicate the current selection (offset slightly)              |
 | `h`            | Toggle a white-on-black cheat-sheet of the hotkeys             |
@@ -279,6 +289,12 @@ source PDF's existing resources. Save under a non-conflicting name.
   are upright; this hasn't bitten me yet.
 - No undo. Use Ctrl+D for "experimental moves" — duplicate first, drag the
   copy, delete one of them when done.
+- **Redactions are visual only.** A `b`-committed redaction is a black
+  rectangle drawn on top of the original content stream — the underlying
+  text is not stripped from the PDF and remains extractable via
+  `pdftotext` or copy-paste. If the redaction needs to survive a
+  determined reader, rasterize the saved file afterwards (e.g.
+  `pdftoppm` + `img2pdf`, or `qpdf --pages` piped through a rasterizer).
 
 ## License
 

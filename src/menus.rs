@@ -211,7 +211,7 @@ pub fn render_help(app: &mut App, ctx: &egui::Context) {
         return;
     }
 
-    let sections: [(&str, &[HelpRow]); 3] = [
+    let sections: [(&str, &[HelpRow]); 4] = [
         (
             "place (cursor over page)",
             &[
@@ -230,6 +230,16 @@ pub fn render_help(app: &mut App, ctx: &egui::Context) {
                 HelpRow { keys: "+ / -",    desc: "resize · text pt, image %" },
                 HelpRow { keys: "wheel",    desc: "resize sel, else paginate" },
                 HelpRow { keys: "c",        desc: "colour picker" },
+            ],
+        ),
+        (
+            "redact",
+            &[
+                HelpRow { keys: "b",        desc: "block mode · drag to blacken area" },
+                HelpRow { keys: "Shift+B",  desc: "mark mode · drag to mark text" },
+                HelpRow { keys: "b",        desc: "commit marks to redactions" },
+                HelpRow { keys: "r",        desc: "toggle redact visibility" },
+                HelpRow { keys: "Esc",      desc: "leave block / mark mode" },
             ],
         ),
         (

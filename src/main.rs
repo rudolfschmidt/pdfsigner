@@ -123,11 +123,11 @@ pub struct App {
     // Mark mode: empty-space drags create yellow pending marks that the user
     // later commits to black via `b`. Toggled by `m`.
     pub(crate) mark_mode: bool,
-    // When false (default), Redact overlays render semi-transparent so the
-    // user can read the covered text and verify their targeting. When true,
-    // they render fully opaque black — the "how does it look when saved" view.
-    // Toggled by `p`. Saving is unaffected (always writes full opaque black).
-    pub(crate) preview_opaque: bool,
+    // Redact visibility toggle. Default true: Redacts render fully opaque
+    // black (exactly like the saved file). Toggled by `r` — when off, they
+    // are not painted at all so the user can read the covered text.
+    // Saving is unaffected (always writes the Redacts).
+    pub(crate) show_redacts: bool,
 }
 
 // ----------------------------------------------------------------------------
@@ -168,7 +168,7 @@ impl App {
             help_open: false,
             block_mode: false,
             mark_mode: false,
-            preview_opaque: false,
+            show_redacts: true,
         }
     }
 
@@ -809,15 +809,11 @@ impl App {
                     );
                 }
                 Overlay::Redact { .. } => {
-                    let color = if self.preview_opaque {
-                        egui::Color32::BLACK
-                    } else {
-                        // Editing mode: semi-transparent so the covered text
-                        // stays readable. Alpha 70 = clearly a redaction
-                        // marker without swallowing the underlying glyphs.
-                        egui::Color32::from_rgba_premultiplied(0, 0, 0, 70)
-                    };
-                    painter.rect_filled(r, 0.0, color);
+                    if self.show_redacts {
+                        painter.rect_filled(r, 0.0, egui::Color32::BLACK);
+                    }
+                    // else: skip drawing entirely — user is peeking at the
+                    // covered text. Save still writes the redaction.
                 }
                 Overlay::PendingMark { .. } => {
                     // Rose tint on the accent-red palette — matches the app's
@@ -1060,11 +1056,10 @@ impl App {
                     self.mark_mode = false;
                     self.pages[cur].overlays.retain(|o| !o.is_pending_mark());
                 }
-                egui::Key::P if !modifiers.shift => {
-                    // Preview toggle: flip Redact overlays between semi-
-                    // transparent (see the covered text) and fully opaque
-                    // (the saved-file look). Saving is unaffected.
-                    self.preview_opaque = !self.preview_opaque;
+                egui::Key::R if !modifiers.shift => {
+                    // Toggle Redact visibility. Off = peek at the text
+                    // underneath. Saving always writes the Redacts either way.
+                    self.show_redacts = !self.show_redacts;
                 }
                 _ => {}
             }
