@@ -6,6 +6,16 @@ and a date, save. Single binary, no cloud, no account, no proprietary stack.
 The UI follows a zathura/feh-style aesthetic: black bars, monospace text,
 keyboard- and mouse-driven, no toolbar buttons cluttering the document area.
 
+## Vision
+
+`libertyveil` stands for freedom, and there is no freedom without freedom of
+contract. Every contract is a document that has to be read, signed, and
+sometimes redacted before it leaves your hands. `pdfsigner` exists to make
+those two operations — sign a PDF, blacken parts of it — fast enough that
+they never become the friction between you and the deal in front of you.
+Local-only, no upload, no account, no third party sitting between you and
+the paperwork.
+
 ## Why
 
 I needed a fast way to sign and date PDFs locally without launching a heavy
