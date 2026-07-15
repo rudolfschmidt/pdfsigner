@@ -116,6 +116,18 @@ pub struct App {
 
     // Hotkey cheat-sheet overlay (toggled by `h`; modal while open).
     pub(crate) help_open: bool,
+
+    // Block mode: empty-space drags create black redaction rectangles.
+    // Toggled by `Shift+B`.
+    pub(crate) block_mode: bool,
+    // Mark mode: empty-space drags create yellow pending marks that the user
+    // later commits to black via `b`. Toggled by `m`.
+    pub(crate) mark_mode: bool,
+    // When false (default), Redact overlays render semi-transparent so the
+    // user can read the covered text and verify their targeting. When true,
+    // they render fully opaque black — the "how does it look when saved" view.
+    // Toggled by `p`. Saving is unaffected (always writes full opaque black).
+    pub(crate) preview_opaque: bool,
 }
 
 // ----------------------------------------------------------------------------
@@ -154,6 +166,9 @@ impl App {
             color_menu_consume_click: false,
             color_custom: None,
             help_open: false,
+            block_mode: false,
+            mark_mode: false,
+            preview_opaque: false,
         }
     }
 
@@ -194,8 +209,11 @@ impl App {
     /// overlay is auto-selected.
     pub fn add_text_at(&mut self, text: String, pdf_x: f32, pdf_y: f32) -> usize {
         let size = self.text_size;
-        // Mouse at the label's bottom-left corner (label extends up-right).
-        let y_top = pdf_y - size;
+        // Anchor the cursor position at the text baseline. For ascender-only
+        // characters (x, digits, dates) the baseline is the visual bottom of
+        // the glyph → the cursor lands exactly where the ink starts, which
+        // matters for stamping small checkboxes precisely.
+        let y_top = pdf_y - size * theme::INTER_BASELINE_RATIO;
         let page = &mut self.pages[self.current];
         page.overlays.push(Overlay::Text {
             text,
@@ -293,6 +311,12 @@ impl App {
                         let new_w = (*w * factor).clamp(IMG_WIDTH_RANGE.0, IMG_WIDTH_RANGE.1);
                         *h *= new_w / *w;
                         *w = new_w;
+                    }
+                    Overlay::Redact { w, h, .. } | Overlay::PendingMark { w, h, .. } => {
+                        // Grow/shrink from the top-left corner proportionally.
+                        let factor = if dir > 0.0 { IMG_RESIZE_FACTOR } else { 1.0 / IMG_RESIZE_FACTOR };
+                        *w = (*w * factor).max(4.0);
+                        *h = (*h * factor).max(4.0);
                     }
                 }
                 applied = true;
@@ -531,18 +555,29 @@ impl App {
                     (self.selected.len() > 1).then(|| format!("{} selected", self.selected.len()));
 
                 ui.horizontal(|ui| {
+                    let mut segments: Vec<(String, egui::Color32)> = vec![];
+                    if self.block_mode {
+                        segments.push(("BLOCK".into(), theme::ACCENT));
+                    }
+                    if self.mark_mode {
+                        let pending = self.pages[self.current]
+                            .overlays
+                            .iter()
+                            .filter(|o| o.is_pending_mark())
+                            .count();
+                        segments.push((format!("MARK · {pending} pending"), theme::ACCENT));
+                    }
                     if let Some(s) = pt_text.as_ref() {
-                        ui.label(label(s.clone(), egui::Color32::WHITE, font.clone()));
+                        segments.push((s.clone(), egui::Color32::WHITE));
                     }
                     if let Some(s) = sel_text.as_ref() {
-                        if pt_text.is_some() {
-                            ui.label(label(
-                                "·".into(),
-                                theme::SEPARATOR_DOT_GRAY,
-                                font.clone(),
-                            ));
+                        segments.push((s.clone(), egui::Color32::WHITE));
+                    }
+                    for (i, (s, c)) in segments.iter().enumerate() {
+                        if i > 0 {
+                            ui.label(label("·".into(), theme::SEPARATOR_DOT_GRAY, font.clone()));
                         }
-                        ui.label(label(s.clone(), egui::Color32::WHITE, font.clone()));
+                        ui.label(label(s.clone(), *c, font.clone()));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let mut layouter = selection_layouter(
@@ -628,7 +663,6 @@ impl App {
                     let tex = ctx.load_texture(format!("page-{cur}"), img, egui::TextureOptions::LINEAR);
                     self.pages[cur].texture = Some(tex);
                 }
-
                 self.draw_page(ui, ctx);
             });
     }
@@ -684,11 +718,25 @@ impl App {
             .collect();
         self.draw_overlays(&painter, &overlay_rects, scale);
 
-        // 3. Marquee selection box (drawn on top of overlays).
+        // 3. Marquee selection box (drawn on top of overlays). In block mode
+        // preview as semi-opaque black; in mark mode as translucent yellow.
         if let Some(start) = self.rubber_band {
             let end = response.interact_pointer_pos().unwrap_or(start);
             let band = egui::Rect::from_two_pos(start, end);
-            painter.rect(band, 0.0, theme::RUBBER_FILL, egui::Stroke::new(1.5, theme::RUBBER_STROKE));
+            let (fill, stroke) = if self.block_mode {
+                (
+                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 80),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(255, 255, 255, 180)),
+                )
+            } else if self.mark_mode {
+                (
+                    egui::Color32::from_rgba_premultiplied(220, 80, 80, 70),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(220, 80, 80, 200)),
+                )
+            } else {
+                (theme::RUBBER_FILL, egui::Stroke::new(1.5, theme::RUBBER_STROKE))
+            };
+            painter.rect(band, 0.0, fill, stroke);
         }
 
         // 4. Pointer (drag / click) — gated by open menus.
@@ -760,6 +808,27 @@ impl App {
                         egui::Color32::from_rgb(color[0], color[1], color[2]),
                     );
                 }
+                Overlay::Redact { .. } => {
+                    let color = if self.preview_opaque {
+                        egui::Color32::BLACK
+                    } else {
+                        // Editing mode: semi-transparent so the covered text
+                        // stays readable. Alpha 70 = clearly a redaction
+                        // marker without swallowing the underlying glyphs.
+                        egui::Color32::from_rgba_premultiplied(0, 0, 0, 70)
+                    };
+                    painter.rect_filled(r, 0.0, color);
+                }
+                Overlay::PendingMark { .. } => {
+                    // Rose tint on the accent-red palette — matches the app's
+                    // red selection theme and reads as "pending, awaiting
+                    // commit" without the yellow-marker garishness.
+                    painter.rect_filled(
+                        r,
+                        0.0,
+                        egui::Color32::from_rgba_premultiplied(220, 80, 80, 55),
+                    );
+                }
             }
             if self.selected.contains(&i) {
                 painter.rect_stroke(r.expand(2.0), 0.0, egui::Stroke::new(2.0, theme::ACCENT));
@@ -778,7 +847,12 @@ impl App {
         let cur = self.current;
 
         if response.drag_started()
-            && let Some(pos) = response.interact_pointer_pos() {
+            // Use press_origin (the click point) rather than
+            // interact_pointer_pos which reflects the current — already-moved —
+            // cursor after egui's drag_threshold has been exceeded.
+            && let Some(pos) = ctx
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| response.interact_pointer_pos()) {
                 match hit_test(rects, pos) {
                     Some(i) => {
                         if !self.selected.contains(&i) {
@@ -818,11 +892,45 @@ impl App {
             if let Some(start) = self.rubber_band.take() {
                 let end = response.interact_pointer_pos().unwrap_or(start);
                 let band = egui::Rect::from_two_pos(start, end);
-                self.selected = rects
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, r)| band.intersects(*r).then_some(i))
-                    .collect();
+                let too_small = band.width() < 3.0 || band.height() < 3.0;
+                if self.block_mode && !too_small {
+                    let (x, y, w, h) = pdf_coords_from_band(band, page_rect, scale);
+                    self.pages[cur].overlays.push(Overlay::Redact { x, y, w, h });
+                    merge_overlapping_redacts(&mut self.pages[cur].overlays);
+                    // Single-shot: exit block mode after one rectangle. Press
+                    // `b` again for another one.
+                    self.block_mode = false;
+                } else if self.mark_mode && !too_small {
+                    let (x, y, w, h) = pdf_coords_from_band(band, page_rect, scale);
+                    let detected = match (self.pdfium.as_ref(), self.pdf_path.as_ref()) {
+                        (Some(pdfium), Some(path)) => {
+                            pdf::detect_text_lines(pdfium, path, cur, (x, y, w, h))
+                        }
+                        _ => vec![],
+                    };
+                    if detected.is_empty() {
+                        self.pages[cur].overlays.push(Overlay::PendingMark { x, y, w, h });
+                        self.status = "No text detected — using rectangle.".into();
+                    } else {
+                        for (mx, my, mw, mh) in detected {
+                            self.pages[cur].overlays.push(Overlay::PendingMark {
+                                x: mx,
+                                y: my,
+                                w: mw,
+                                h: mh,
+                            });
+                        }
+                    }
+                    // Any overlap with existing PendingMarks → merge into a
+                    // single union rect. Guarantees an area is marked once.
+                    merge_overlapping_marks(&mut self.pages[cur].overlays);
+                } else if !self.block_mode && !self.mark_mode {
+                    self.selected = rects
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, r)| band.intersects(*r).then_some(i))
+                        .collect();
+                }
             }
             self.drag_offsets.clear();
         }
@@ -921,6 +1029,43 @@ impl App {
                         self.color_menu = if self.color_menu.is_some() { None } else { Some(pos) };
                     }
                 }
+                egui::Key::B if modifiers.shift && !self.block_mode => {
+                    // Shift+B toggles mark mode. Ignored while block mode is
+                    // active — user must Esc out of block mode first.
+                    self.mark_mode = !self.mark_mode;
+                    self.selected.clear();
+                }
+                egui::Key::B if !modifiers.shift => {
+                    // `b` always means "make it black" — context-aware:
+                    // - In mark mode: commit every PendingMark to a Redact.
+                    //   Stay in mark mode so the user can keep selecting.
+                    // - Otherwise: toggle block mode (single-shot drag).
+                    if self.mark_mode {
+                        let overlays = &mut self.pages[cur].overlays;
+                        for o in overlays.iter_mut() {
+                            if let Overlay::PendingMark { x, y, w, h } = *o {
+                                *o = Overlay::Redact { x, y, w, h };
+                            }
+                        }
+                        merge_overlapping_redacts(&mut self.pages[cur].overlays);
+                    } else {
+                        self.block_mode = !self.block_mode;
+                        self.selected.clear();
+                    }
+                }
+                egui::Key::Escape if self.block_mode || self.mark_mode => {
+                    // Leave whichever mode is on and discard pending marks
+                    // (which are UI-only anyway).
+                    self.block_mode = false;
+                    self.mark_mode = false;
+                    self.pages[cur].overlays.retain(|o| !o.is_pending_mark());
+                }
+                egui::Key::P if !modifiers.shift => {
+                    // Preview toggle: flip Redact overlays between semi-
+                    // transparent (see the covered text) and fully opaque
+                    // (the saved-file look). Saving is unaffected.
+                    self.preview_opaque = !self.preview_opaque;
+                }
                 _ => {}
             }
         }
@@ -933,5 +1078,85 @@ impl App {
 
 fn label(text: String, color: egui::Color32, font: egui::FontId) -> egui::RichText {
     egui::RichText::new(text).color(color).font(font)
+}
+
+/// Fold overlays of the same "kind" (extracted via `extract`) that share any
+/// positive area with each other into a single union rectangle. Guarantees no
+/// two rects of that kind overlap afterwards, so the visual result of marking
+/// the same area N times is identical to marking it once (no alpha stacking,
+/// no double-processing).
+fn merge_overlapping<K, M>(overlays: &mut Vec<Overlay>, extract: K, make: M)
+where
+    K: Fn(&Overlay) -> Option<(f32, f32, f32, f32)>,
+    M: Fn(f32, f32, f32, f32) -> Overlay,
+{
+    let mut rects: Vec<(f32, f32, f32, f32)> = vec![];
+    overlays.retain(|o| match extract(o) {
+        Some(r) => {
+            rects.push(r);
+            false
+        }
+        None => true,
+    });
+    loop {
+        let mut merged = None;
+        'search: for i in 0..rects.len() {
+            for j in (i + 1)..rects.len() {
+                if intersection_area(rects[i], rects[j]) > 0.0 {
+                    merged = Some((i, j, union_rect(rects[i], rects[j])));
+                    break 'search;
+                }
+            }
+        }
+        match merged {
+            Some((i, j, u)) => {
+                rects[i] = u;
+                rects.remove(j);
+            }
+            None => break,
+        }
+    }
+    for (x, y, w, h) in rects {
+        overlays.push(make(x, y, w, h));
+    }
+}
+
+fn merge_overlapping_redacts(overlays: &mut Vec<Overlay>) {
+    merge_overlapping(
+        overlays,
+        |o| if let Overlay::Redact { x, y, w, h } = *o { Some((x, y, w, h)) } else { None },
+        |x, y, w, h| Overlay::Redact { x, y, w, h },
+    );
+}
+
+fn merge_overlapping_marks(overlays: &mut Vec<Overlay>) {
+    merge_overlapping(
+        overlays,
+        |o| if let Overlay::PendingMark { x, y, w, h } = *o { Some((x, y, w, h)) } else { None },
+        |x, y, w, h| Overlay::PendingMark { x, y, w, h },
+    );
+}
+
+fn intersection_area(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> f32 {
+    let ox = (a.0 + a.2).min(b.0 + b.2) - a.0.max(b.0);
+    let oy = (a.1 + a.3).min(b.1 + b.3) - a.1.max(b.1);
+    ox.max(0.0) * oy.max(0.0)
+}
+fn union_rect(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+    let x = a.0.min(b.0);
+    let y = a.1.min(b.1);
+    let r = (a.0 + a.2).max(b.0 + b.2);
+    let bo = (a.1 + a.3).max(b.1 + b.3);
+    (x, y, r - x, bo - y)
+}
+
+/// Screen-space band → PDF-space (x, y, w, h) tuple.
+fn pdf_coords_from_band(band: egui::Rect, page_rect: egui::Rect, scale: f32) -> (f32, f32, f32, f32) {
+    (
+        (band.min.x - page_rect.min.x) / scale,
+        (band.min.y - page_rect.min.y) / scale,
+        band.width() / scale,
+        band.height() / scale,
+    )
 }
 

@@ -62,12 +62,123 @@ pub fn load_pages(pdfium: &Pdfium, path: &Path) -> Result<Vec<LoadedPage>> {
 }
 
 // ----------------------------------------------------------------------------
+// Text detection
+// ----------------------------------------------------------------------------
+
+/// One bounding box per **word** of text found inside `rect` (in top-down
+/// PDF-point coordinates). Whitespace chars are dropped, so the mask covers
+/// only visible glyphs — the space between words stays untouched, unlike a
+/// naive whole-rectangle redaction. Returns empty when the page has no text
+/// (e.g. a scan without OCR) or pdfium fails.
+pub fn detect_text_lines(
+    pdfium: &Pdfium,
+    path: &Path,
+    page_idx: usize,
+    rect: (f32, f32, f32, f32),
+) -> Vec<(f32, f32, f32, f32)> {
+    let Ok(doc) = pdfium.load_pdf_from_file(path, None) else { return vec![] };
+    let pages = doc.pages();
+    let Ok(page) = pages.get(page_idx as u16) else { return vec![] };
+    let page_h_pt = page.height().value;
+    let (x, y, w, h) = rect;
+    let sel_left = x;
+    let sel_right = x + w;
+    let sel_top = y;
+    let sel_bottom = y + h;
+
+    let Ok(text) = page.text() else { return vec![] };
+    // pdfium-render's `chars_inside_rect` only samples at two points and
+    // returns `NoCharsInRect` for anything but a very narrow strip. We
+    // iterate every char and intersect ourselves.
+    let mut boxes = vec![];
+    for c in text.chars().iter() {
+        if c.unicode_char().is_some_and(|ch| ch.is_whitespace()) {
+            continue;
+        }
+        let Ok(b) = c.tight_bounds() else { continue };
+        let cw = b.width().value;
+        let ch = b.height().value;
+        if cw <= 0.0 || ch <= 0.0 {
+            continue;
+        }
+        let cx = b.left().value;
+        let cy = page_h_pt - b.top().value; // pdfium bottom-up → top-down
+        // Reject chars outside the selection rectangle (top-down coords).
+        let overlaps = cx + cw > sel_left
+            && cx < sel_right
+            && cy + ch > sel_top
+            && cy < sel_bottom;
+        if overlaps {
+            boxes.push((cx, cy, cw, ch));
+        }
+    }
+    cluster_by_word(boxes)
+}
+
+/// Group chars into words: first bin by y-band (line), then within a line
+/// split whenever the x-gap between consecutive chars exceeds the running
+/// average char width (indicating an actual whitespace gap).
+fn cluster_by_word(mut boxes: Vec<(f32, f32, f32, f32)>) -> Vec<(f32, f32, f32, f32)> {
+    if boxes.is_empty() {
+        return boxes;
+    }
+    // Bin by y-band to identify lines.
+    boxes.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut lines: Vec<Vec<(f32, f32, f32, f32)>> = vec![vec![boxes[0]]];
+    for c in boxes.into_iter().skip(1) {
+        let last = lines.last_mut().unwrap();
+        let ref_y = last[0].1;
+        let ref_h = last[0].3;
+        if (c.1 - ref_y).abs() < ref_h * 0.5 {
+            last.push(c);
+        } else {
+            lines.push(vec![c]);
+        }
+    }
+    // Within each line, sort by x and split on wide gaps.
+    let mut words = vec![];
+    for mut line in lines {
+        line.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        if line.is_empty() {
+            continue;
+        }
+        let avg_w = line.iter().map(|c| c.2).sum::<f32>() / line.len() as f32;
+        let gap_threshold = (avg_w * 0.5).max(1.5);
+        let mut current: Vec<(f32, f32, f32, f32)> = vec![line[0]];
+        let mut prev_right = line[0].0 + line[0].2;
+        for c in line.into_iter().skip(1) {
+            let gap = c.0 - prev_right;
+            if gap > gap_threshold {
+                words.push(bbox_of(&current));
+                current = vec![c];
+            } else {
+                current.push(c);
+            }
+            prev_right = c.0 + c.2;
+        }
+        if !current.is_empty() {
+            words.push(bbox_of(&current));
+        }
+    }
+    words
+}
+
+fn bbox_of(chars: &[(f32, f32, f32, f32)]) -> (f32, f32, f32, f32) {
+    let min_x = chars.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
+    let min_y = chars.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
+    let max_x = chars.iter().map(|c| c.0 + c.2).fold(f32::NEG_INFINITY, f32::max);
+    let max_y = chars.iter().map(|c| c.1 + c.3).fold(f32::NEG_INFINITY, f32::max);
+    (min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
+// ----------------------------------------------------------------------------
 // Saving
 // ----------------------------------------------------------------------------
 
-/// Write `<input>_signed.pdf` (or `_signed_N.pdf` if it exists) with `overlays`
-/// applied to each page. `pages_filter` like "1-3,5" keeps only those pages
-/// in the output; empty string keeps all.
+/// Write `<input>_signed.pdf` (or `_masked.pdf` if any overlay is a redaction,
+/// with `_N` appended when the target already exists) with `overlays` applied
+/// to each page. `pages_filter` like "1-3,5" keeps only those pages in the
+/// output; empty string keeps all.
 pub fn save(
     pdfium: Option<&Pdfium>,
     input: &Path,
@@ -75,7 +186,8 @@ pub fn save(
     page_size_pt: &[(f32, f32)],
     pages_filter: &str,
 ) -> Result<PathBuf> {
-    let output = unique_output_path(input);
+    let has_redact = overlays_per_page.iter().flatten().any(Overlay::is_redact);
+    let output = unique_output_path(input, has_redact);
 
     let mut doc = load_pdf_robust(input, pdfium)?;
     let page_ids: Vec<ObjectId> = doc.get_pages().into_values().collect();
@@ -109,16 +221,17 @@ pub fn save(
     Ok(output)
 }
 
-fn unique_output_path(input: &Path) -> PathBuf {
+fn unique_output_path(input: &Path, has_redact: bool) -> PathBuf {
     let stem = input
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "out".into());
     let parent = input.parent().unwrap_or(Path::new("."));
-    let mut output = parent.join(format!("{stem}_signed.pdf"));
+    let suffix = if has_redact { "masked" } else { "signed" };
+    let mut output = parent.join(format!("{stem}_{suffix}.pdf"));
     let mut n = 1;
     while output.exists() {
-        output = parent.join(format!("{stem}_signed_{n}.pdf"));
+        output = parent.join(format!("{stem}_{suffix}_{n}.pdf"));
         n += 1;
     }
     output
@@ -200,6 +313,22 @@ fn write_overlays_for_page(
                     content.extend_from_slice(b"> Tj\n");
                 }
                 content.extend_from_slice(b"ET\n");
+            }
+            Overlay::Redact { x, y, w, h } => {
+                // Opaque black rectangle. `y` is top-down in screen coords;
+                // PDF y is bottom-up, so we flip.
+                let pdf_y = page_h_pt - y - h;
+                content.extend_from_slice(
+                    format!(
+                        "q\n0 0 0 rg\n{:.4} {:.4} {:.4} {:.4} re\nf\nQ\n",
+                        x, pdf_y, w, h
+                    )
+                    .as_bytes(),
+                );
+            }
+            Overlay::PendingMark { .. } => {
+                // UI-only state; not persisted in the saved PDF. Should be
+                // committed to `Redact` (via `b`) or discarded (Esc) first.
             }
         }
     }

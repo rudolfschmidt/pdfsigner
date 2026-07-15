@@ -8,14 +8,34 @@ use std::path::PathBuf;
 pub enum Overlay {
     Image { path: PathBuf, x: f32, y: f32, w: f32, h: f32 },
     Text { text: String, x: f32, y: f32, size_pt: f32, color: [u8; 3] },
+    /// Opaque black rectangle covering the area (visual redaction).
+    /// Note: the underlying text objects in the source PDF are NOT removed —
+    /// `pdftotext` can still extract them. Run `pdf.sanitize` afterwards for
+    /// permanent redaction.
+    Redact { x: f32, y: f32, w: f32, h: f32 },
+    /// Yellow half-transparent highlight awaiting commit — the user picked
+    /// this area in mark mode but hasn't turned it into a redaction yet.
+    /// NOT persisted in the saved PDF (transient UI state).
+    PendingMark { x: f32, y: f32, w: f32, h: f32 },
 }
 
 impl Overlay {
     /// Top-left position in PDF points, mutable.
     pub fn position_mut(&mut self) -> (&mut f32, &mut f32) {
         match self {
-            Overlay::Image { x, y, .. } | Overlay::Text { x, y, .. } => (x, y),
+            Overlay::Image { x, y, .. }
+            | Overlay::Text { x, y, .. }
+            | Overlay::Redact { x, y, .. }
+            | Overlay::PendingMark { x, y, .. } => (x, y),
         }
+    }
+
+    pub fn is_redact(&self) -> bool {
+        matches!(self, Overlay::Redact { .. })
+    }
+
+    pub fn is_pending_mark(&self) -> bool {
+        matches!(self, Overlay::PendingMark { .. })
     }
 }
 
@@ -27,7 +47,9 @@ impl Overlay {
 /// has a clickable / drawable cursor area.
 pub fn overlay_rect(o: &Overlay, page_rect: egui::Rect, scale: f32, ctx: &egui::Context) -> egui::Rect {
     match o {
-        Overlay::Image { x, y, w, h, .. } => egui::Rect::from_min_size(
+        Overlay::Image { x, y, w, h, .. }
+        | Overlay::Redact { x, y, w, h }
+        | Overlay::PendingMark { x, y, w, h } => egui::Rect::from_min_size(
             page_rect.min + egui::vec2(x * scale, y * scale),
             egui::vec2(w * scale, h * scale),
         ),
