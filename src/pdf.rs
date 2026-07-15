@@ -222,10 +222,15 @@ pub fn save(
 }
 
 fn unique_output_path(input: &Path, has_redact: bool) -> PathBuf {
-    let stem = input
+    let raw_stem = input
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "out".into());
+    // Recover the original base name: if the input is itself a previous
+    // output (`foo_signed`, `foo_masked_3`, …), strip that tail so
+    // re-saving `foo_masked.pdf` produces `foo_masked_1.pdf` rather than
+    // `foo_masked_masked.pdf`.
+    let stem = strip_output_suffix(&raw_stem);
     let parent = input.parent().unwrap_or(Path::new("."));
     let suffix = if has_redact { "masked" } else { "signed" };
     let mut output = parent.join(format!("{stem}_{suffix}.pdf"));
@@ -235,6 +240,30 @@ fn unique_output_path(input: &Path, has_redact: bool) -> PathBuf {
         n += 1;
     }
     output
+}
+
+/// Strip a trailing `_signed` / `_masked` (optionally followed by `_<N>`
+/// counter) from `stem`. Everything else is returned unchanged, so a
+/// user file that just happens to contain the substring elsewhere is
+/// left alone.
+fn strip_output_suffix(stem: &str) -> &str {
+    for suf in ["_signed", "_masked"] {
+        if let Some(rest) = stem.strip_suffix(suf) {
+            return rest;
+        }
+    }
+    if let Some(pos) = stem.rfind('_') {
+        let tail = &stem[pos + 1..];
+        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+            let head = &stem[..pos];
+            for suf in ["_signed", "_masked"] {
+                if let Some(rest) = head.strip_suffix(suf) {
+                    return rest;
+                }
+            }
+        }
+    }
+    stem
 }
 
 fn parse_keep_filter(filter: &str, total: usize) -> Result<Option<HashSet<usize>>> {
@@ -649,6 +678,21 @@ fn add_page_resource(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_output_suffix_recovers_base_name() {
+        assert_eq!(strip_output_suffix("contract"), "contract");
+        assert_eq!(strip_output_suffix("contract_signed"), "contract");
+        assert_eq!(strip_output_suffix("contract_masked"), "contract");
+        assert_eq!(strip_output_suffix("contract_signed_1"), "contract");
+        assert_eq!(strip_output_suffix("contract_masked_42"), "contract");
+        // Only a trailing counter with no known suffix under it → unchanged.
+        assert_eq!(strip_output_suffix("draft_v2"), "draft_v2");
+        assert_eq!(strip_output_suffix("report_2024"), "report_2024");
+        // Suffix-lookalike embedded elsewhere → unchanged.
+        assert_eq!(strip_output_suffix("masked_contract"), "masked_contract");
+        assert_eq!(strip_output_suffix("signed_by_alice"), "signed_by_alice");
+    }
 
     /// Write a minimal blank A4 page via lopdf so the tests are self-contained
     /// (no external `gs`/fixture needed — only pdfium for rendering).

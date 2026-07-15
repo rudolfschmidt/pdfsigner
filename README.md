@@ -201,9 +201,16 @@ Zathura-style modeline:
 
 ### Output naming
 
-Saving `~/Documents/contract.pdf` writes `~/Documents/contract_signed.pdf`.
-If that file already exists, the next save uses `contract_signed_1.pdf`,
-then `_2.pdf`, etc. The original PDF is never touched.
+Saving `~/Documents/contract.pdf` writes `~/Documents/contract_signed.pdf`,
+or `~/Documents/contract_masked.pdf` if the file contains any `b`-committed
+redactions. If that output name already exists, the next save uses
+`..._signed_1.pdf` / `..._masked_1.pdf`, then `_2.pdf`, etc. The original
+PDF is never touched.
+
+Re-opening a previous output (`contract_signed.pdf`, `contract_masked_3.pdf`, …)
+is recognized: the tool strips the existing `_signed` / `_masked[_N]` tail
+before composing the new name, so you get `contract_signed_1.pdf` and not
+`contract_signed_signed.pdf`.
 
 ## Configuration
 
