@@ -65,11 +65,12 @@ pub fn load_pages(pdfium: &Pdfium, path: &Path) -> Result<Vec<LoadedPage>> {
 // Text detection
 // ----------------------------------------------------------------------------
 
-/// One bounding box per **word** of text found inside `rect` (in top-down
-/// PDF-point coordinates). Whitespace chars are dropped, so the mask covers
-/// only visible glyphs — the space between words stays untouched, unlike a
-/// naive whole-rectangle redaction. Returns empty when the page has no text
-/// (e.g. a scan without OCR) or pdfium fails.
+/// One bounding box per **word** of text found inside `rect`, in displayed
+/// top-down PDF-point coordinates. A word is a run of consecutive
+/// non-whitespace glyphs on the same baseline in document order. Returned
+/// rects are clipped to `rect` so OCR-inflated char cells don't paint bars
+/// far beyond the user's drag. Empty return means the page has no
+/// extractable text (e.g. a scan without OCR) or the drag missed all text.
 pub fn detect_text_lines(
     pdfium: &Pdfium,
     path: &Path,
@@ -79,96 +80,166 @@ pub fn detect_text_lines(
     let Ok(doc) = pdfium.load_pdf_from_file(path, None) else { return vec![] };
     let pages = doc.pages();
     let Ok(page) = pages.get(page_idx as u16) else { return vec![] };
-    let page_h_pt = page.height().value;
-    let (x, y, w, h) = rect;
-    let sel_left = x;
-    let sel_right = x + w;
-    let sel_top = y;
-    let sel_bottom = y + h;
-
     let Ok(text) = page.text() else { return vec![] };
-    // pdfium-render's `chars_inside_rect` only samples at two points and
-    // returns `NoCharsInRect` for anything but a very narrow strip. We
-    // iterate every char and intersect ourselves.
-    let mut boxes = vec![];
+    let frame = page_frame(&page);
+    let mut out = vec![];
+    for_each_word(&text, |word_mb| {
+        let word_disp = media_box_to_displayed(
+            frame.rotate,
+            frame.mb_w,
+            frame.mb_h,
+            word_mb.0,
+            word_mb.1,
+            word_mb.2,
+            word_mb.3,
+        );
+        if let Some(hit) = match_and_clip(word_disp, rect) {
+            out.push(hit);
+        }
+    });
+    out
+}
+
+/// Page dimensions + intrinsic rotation, cached in a single struct so the
+/// caller doesn't juggle a 3-tuple.
+struct PageFrame {
+    /// pdfium's `/Rotate` value (0/90/180/270). Anything else falls back to 0.
+    rotate: i32,
+    /// Unrotated MediaBox width in points.
+    mb_w: f32,
+    /// Unrotated MediaBox height in points.
+    mb_h: f32,
+}
+
+fn page_frame(page: &PdfPage) -> PageFrame {
+    // pdfium's `width()`/`height()` are the *displayed* dims (they already
+    // apply `/Rotate`). We reconstruct the unrotated MediaBox by swapping
+    // when the page is on its side.
+    let rot_w = page.width().value;
+    let rot_h = page.height().value;
+    let rotate = page.rotation().map(rotation_degrees).unwrap_or(0);
+    let (mb_w, mb_h) = if rotate == 90 || rotate == 270 {
+        (rot_h, rot_w)
+    } else {
+        (rot_w, rot_h)
+    };
+    PageFrame { rotate, mb_w, mb_h }
+}
+
+/// Convert pdfium-render's `PdfPageRenderRotation` variant into an integer
+/// degrees value (0/90/180/270).
+fn rotation_degrees(rot: pdfium_render::prelude::PdfPageRenderRotation) -> i32 {
+    use pdfium_render::prelude::PdfPageRenderRotation as R;
+    match rot {
+        R::None => 0,
+        R::Degrees90 => 90,
+        R::Degrees180 => 180,
+        R::Degrees270 => 270,
+    }
+}
+
+/// Walk `text` in document order and emit one word rect per maximal run of
+/// consecutive non-whitespace glyphs on the same baseline. Emitted rects
+/// are `(left, bottom, width, height)` in MediaBox y-up. Whitespace glyphs
+/// and baseline jumps both break the current word.
+///
+/// pdfium exposes `text.segments()` which sounds like it does this, but its
+/// bounds include the phantom advance to the *next* segment — on
+/// column-aligned layouts (invoices, tables) that spans half a line.
+fn for_each_word(text: &PdfPageText, mut emit: impl FnMut((f32, f32, f32, f32))) {
+    let mut current: Option<(f32, f32, f32, f32)> = None;
+    let close = |current: &mut Option<_>, emit: &mut dyn FnMut(_)| {
+        if let Some((l, b, r, t)) = current.take() {
+            emit((l, b, r - l, t - b));
+        }
+    };
     for c in text.chars().iter() {
         if c.unicode_char().is_some_and(|ch| ch.is_whitespace()) {
+            close(&mut current, &mut emit);
             continue;
         }
         let Ok(b) = c.tight_bounds() else { continue };
-        let cw = b.width().value;
-        let ch = b.height().value;
-        if cw <= 0.0 || ch <= 0.0 {
+        let (l, bt, r, t) = (b.left().value, b.bottom().value, b.right().value, b.top().value);
+        if r <= l || t <= bt {
             continue;
         }
-        let cx = b.left().value;
-        let cy = page_h_pt - b.top().value; // pdfium bottom-up → top-down
-        // Reject chars outside the selection rectangle (top-down coords).
-        let overlaps = cx + cw > sel_left
-            && cx < sel_right
-            && cy + ch > sel_top
-            && cy < sel_bottom;
-        if overlaps {
-            boxes.push((cx, cy, cw, ch));
+        if let Some((_, prev_b, _, prev_t)) = current
+            && !on_same_baseline(prev_b, prev_t, bt, t)
+        {
+            close(&mut current, &mut emit);
         }
+        current = Some(match current {
+            None => (l, bt, r, t),
+            Some((cl, cb, cr, ct)) => (cl.min(l), cb.min(bt), cr.max(r), ct.max(t)),
+        });
     }
-    cluster_by_word(boxes)
+    close(&mut current, &mut emit);
 }
 
-/// Group chars into words: first bin by y-band (line), then within a line
-/// split whenever the x-gap between consecutive chars exceeds the running
-/// average char width (indicating an actual whitespace gap).
-fn cluster_by_word(mut boxes: Vec<(f32, f32, f32, f32)>) -> Vec<(f32, f32, f32, f32)> {
-    if boxes.is_empty() {
-        return boxes;
-    }
-    // Bin by y-band to identify lines.
-    boxes.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    let mut lines: Vec<Vec<(f32, f32, f32, f32)>> = vec![vec![boxes[0]]];
-    for c in boxes.into_iter().skip(1) {
-        let last = lines.last_mut().unwrap();
-        let ref_y = last[0].1;
-        let ref_h = last[0].3;
-        if (c.1 - ref_y).abs() < ref_h * 0.5 {
-            last.push(c);
-        } else {
-            lines.push(vec![c]);
-        }
-    }
-    // Within each line, sort by x and split on wide gaps.
-    let mut words = vec![];
-    for mut line in lines {
-        line.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        if line.is_empty() {
-            continue;
-        }
-        let avg_w = line.iter().map(|c| c.2).sum::<f32>() / line.len() as f32;
-        let gap_threshold = (avg_w * 0.5).max(1.5);
-        let mut current: Vec<(f32, f32, f32, f32)> = vec![line[0]];
-        let mut prev_right = line[0].0 + line[0].2;
-        for c in line.into_iter().skip(1) {
-            let gap = c.0 - prev_right;
-            if gap > gap_threshold {
-                words.push(bbox_of(&current));
-                current = vec![c];
-            } else {
-                current.push(c);
-            }
-            prev_right = c.0 + c.2;
-        }
-        if !current.is_empty() {
-            words.push(bbox_of(&current));
-        }
-    }
-    words
+/// True if the new glyph (y-range `[bt, t]` in MediaBox y-up) sits on the
+/// same baseline as the current word (previous glyph `[prev_b, prev_t]`).
+/// Threshold is half the glyph height so multi-line jumps break the word
+/// even when the intervening whitespace char is missing.
+fn on_same_baseline(prev_b: f32, prev_t: f32, bt: f32, t: f32) -> bool {
+    let half_h = (prev_t - prev_b) * 0.5;
+    (bt - prev_b).abs() <= half_h && (t - prev_t).abs() <= half_h
 }
 
-fn bbox_of(chars: &[(f32, f32, f32, f32)]) -> (f32, f32, f32, f32) {
-    let min_x = chars.iter().map(|c| c.0).fold(f32::INFINITY, f32::min);
-    let min_y = chars.iter().map(|c| c.1).fold(f32::INFINITY, f32::min);
-    let max_x = chars.iter().map(|c| c.0 + c.2).fold(f32::NEG_INFINITY, f32::max);
-    let max_y = chars.iter().map(|c| c.1 + c.3).fold(f32::NEG_INFINITY, f32::max);
-    (min_x, min_y, max_x - min_x, max_y - min_y)
+/// Decide whether a word rect should be marked given the user's selection,
+/// and if so return the clipped-to-selection version. Both inputs are in
+/// the same (displayed top-down) frame.
+///
+/// A word qualifies when either the word's center lies inside the
+/// selection *or* the selection's center lies inside the word — this
+/// handles both wide drags (word center in sel) and tight drags on a
+/// small part of an OCR-inflated word rect (sel center in word).
+/// The returned rect is the intersection, so an OCR-inflated word never
+/// paints outside what the user actually dragged.
+fn match_and_clip(
+    word: (f32, f32, f32, f32),
+    sel: (f32, f32, f32, f32),
+) -> Option<(f32, f32, f32, f32)> {
+    let (wl, wt, ww, wh) = word;
+    let (sl, st, sw, sh) = sel;
+    let (wr, wb) = (wl + ww, wt + wh);
+    let (sr, sb) = (sl + sw, st + sh);
+    let word_mid = (wl + ww * 0.5, wt + wh * 0.5);
+    let sel_mid = (sl + sw * 0.5, st + sh * 0.5);
+    let in_rect = |px: f32, py: f32, l: f32, t: f32, r: f32, b: f32| {
+        px >= l && px <= r && py >= t && py <= b
+    };
+    let hit = in_rect(word_mid.0, word_mid.1, sl, st, sr, sb)
+        || in_rect(sel_mid.0, sel_mid.1, wl, wt, wr, wb);
+    if !hit {
+        return None;
+    }
+    let cl = wl.max(sl);
+    let ct = wt.max(st);
+    let cr = wr.min(sr);
+    let cb = wb.min(sb);
+    (cr > cl && cb > ct).then_some((cl, ct, cr - cl, cb - ct))
+}
+
+/// Inverse of [`rect_to_media_box`]: takes a rectangle expressed in the
+/// *unrotated* MediaBox y-up frame (as pdfium reports for text bounds) and
+/// returns its equivalent in the *rotated display* top-down frame that the
+/// user sees on-screen. `mb_w`/`mb_h` are the unrotated MediaBox dims;
+/// `rl`/`rb`/`rw`/`rh` are the rectangle's left/bottom/width/height.
+fn media_box_to_displayed(
+    rotate: i32,
+    mb_w: f32,
+    mb_h: f32,
+    rl: f32,
+    rb: f32,
+    rw: f32,
+    rh: f32,
+) -> (f32, f32, f32, f32) {
+    match rotate.rem_euclid(360) {
+        90 => (rb, rl, rh, rw),
+        180 => (mb_w - rl - rw, rb, rw, rh),
+        270 => (mb_h - rb - rh, mb_w - rl - rw, rh, rw),
+        _ => (rl, mb_h - rb - rh, rw, rh),
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -204,8 +275,8 @@ pub fn save(
             Some(v) if !v.is_empty() => v,
             _ => continue,
         };
-        let (_, page_h_pt) = *page_size_pt.get(idx).unwrap_or(&(595.0, 842.0));
-        write_overlays_for_page(&mut doc, page_id, page_h_pt, overlays, &mut inter_font_id)?;
+        let rotated_size = *page_size_pt.get(idx).unwrap_or(&(595.0, 842.0));
+        write_overlays_for_page(&mut doc, page_id, rotated_size, overlays, &mut inter_font_id)?;
     }
 
     if let Some(k) = &keep {
@@ -240,6 +311,52 @@ fn unique_output_path(input: &Path, has_redact: bool) -> PathBuf {
         n += 1;
     }
     output
+}
+
+/// Read the effective `/Rotate` value for a page. `/Rotate` is inheritable
+/// through the `/Parent` chain, and the spec constrains it to a multiple of
+/// 90; anything else (or missing) is treated as 0.
+fn read_page_rotate(doc: &Document, page_id: ObjectId) -> i32 {
+    let mut cur = page_id;
+    for _ in 0..16 {
+        let Ok(obj) = doc.get_object(cur) else { return 0 };
+        let Ok(dict) = obj.as_dict() else { return 0 };
+        if let Ok(v) = dict.get(b"Rotate")
+            && let Ok(n) = v.as_i64() {
+            let r = (n.rem_euclid(360)) as i32;
+            return match r {
+                0 | 90 | 180 | 270 => r,
+                _ => 0,
+            };
+        }
+        match dict.get(b"Parent") {
+            Ok(Object::Reference(r)) => cur = *r,
+            _ => return 0,
+        }
+    }
+    0
+}
+
+/// Transform a top-down `(x, y, w, h)` rectangle expressed in the *rotated
+/// display* frame into the `(px, py, pw, ph)` tuple to feed into a PDF
+/// `re` operator — i.e. bottom-left corner in the *unrotated* MediaBox
+/// y-up frame plus width/height. `mb_w`/`mb_h` are the unrotated MediaBox
+/// dimensions.
+fn rect_to_media_box(
+    rotate: i32,
+    mb_w: f32,
+    mb_h: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> (f32, f32, f32, f32) {
+    match rotate.rem_euclid(360) {
+        90 => (y, x, h, w),
+        180 => (mb_w - x - w, y, w, h),
+        270 => (mb_w - y - h, mb_h - x - w, h, w),
+        _ => (x, mb_h - y - h, w, h),
+    }
 }
 
 /// Strip a trailing `_signed` / `_masked` (optionally followed by `_<N>`
@@ -281,7 +398,7 @@ fn parse_keep_filter(filter: &str, total: usize) -> Result<Option<HashSet<usize>
 fn write_overlays_for_page(
     doc: &mut Document,
     page_id: ObjectId,
-    page_h_pt: f32,
+    rotated_size_pt: (f32, f32),
     overlays: &[Overlay],
     inter_font_id: &mut Option<ObjectId>,
 ) -> Result<()> {
@@ -290,6 +407,23 @@ fn write_overlays_for_page(
     let existing_fonts = page_resource_keys(doc, page_id, b"Font");
     let mut used_xobj = page_resource_keys(doc, page_id, b"XObject");
     let font_name = pick_free_name(&existing_fonts, "F");
+
+    // Overlay coordinates come from the user in the *rotated display* frame —
+    // pdfium renders the page with `/Rotate` applied, so what the user sees
+    // (and marks) is already-rotated. Text/image emission still lives in the
+    // rotated frame (pre-rotation orientation isn't handled — see below), but
+    // redact rects transform cleanly and we map them into the unrotated
+    // MediaBox frame before writing.
+    let rotate = read_page_rotate(doc, page_id);
+    let (rot_w, rot_h) = rotated_size_pt;
+    let (mb_w, mb_h) = if rotate == 90 || rotate == 270 {
+        (rot_h, rot_w)
+    } else {
+        (rot_w, rot_h)
+    };
+    // `page_h_pt` is the rotated-frame height, used by Text/Image emission
+    // (which stays in the rotated frame — orientation not yet handled).
+    let page_h_pt = rot_h;
 
     let mut content: Vec<u8> = Vec::new();
     content.extend_from_slice(b"Q\n"); // close `q` prepended by wrap_and_append_overlay
@@ -344,13 +478,13 @@ fn write_overlays_for_page(
                 content.extend_from_slice(b"ET\n");
             }
             Overlay::Redact { x, y, w, h } => {
-                // Opaque black rectangle. `y` is top-down in screen coords;
-                // PDF y is bottom-up, so we flip.
-                let pdf_y = page_h_pt - y - h;
+                // Rotated-display (top-down) → MediaBox y-up rectangle so
+                // `/Rotate 90/180/270` pages get the redaction bar at the
+                // same visual position the user marked.
+                let (px, py, pw, ph) = rect_to_media_box(rotate, mb_w, mb_h, *x, *y, *w, *h);
                 content.extend_from_slice(
                     format!(
-                        "q\n0 0 0 rg\n{:.4} {:.4} {:.4} {:.4} re\nf\nQ\n",
-                        x, pdf_y, w, h
+                        "q\n0 0 0 rg\n{px:.4} {py:.4} {pw:.4} {ph:.4} re\nf\nQ\n",
                     )
                     .as_bytes(),
                 );
@@ -678,6 +812,81 @@ fn add_page_resource(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn match_and_clip_hits_when_centers_overlap() {
+        // Word fits inside selection → returned rect equals the word.
+        let word = (10.0f32, 10.0, 20.0, 8.0);
+        let sel = (0.0f32, 0.0, 100.0, 50.0);
+        assert_eq!(match_and_clip(word, sel), Some(word));
+
+        // Selection fully inside word (tight drag on OCR-inflated word) →
+        // clipped to selection.
+        let word = (0.0f32, 0.0, 100.0, 20.0);
+        let sel = (30.0f32, 5.0, 10.0, 10.0);
+        assert_eq!(match_and_clip(word, sel), Some(sel));
+
+        // Word center in selection, but word extends beyond → clipped to
+        // intersection.
+        let word = (50.0f32, 10.0, 60.0, 10.0);
+        let sel = (60.0f32, 5.0, 40.0, 30.0);
+        // intersection: x=[60, 100] w=40, y=[10, 20] h=10
+        assert_eq!(match_and_clip(word, sel), Some((60.0, 10.0, 40.0, 10.0)));
+
+        // Neither center in the other → no hit.
+        let word = (0.0f32, 0.0, 10.0, 10.0);
+        let sel = (50.0f32, 50.0, 10.0, 10.0);
+        assert_eq!(match_and_clip(word, sel), None);
+
+        // Touching but not overlapping → no hit (clip yields degenerate).
+        let word = (0.0f32, 0.0, 10.0, 10.0);
+        let sel = (10.0f32, 0.0, 10.0, 10.0);
+        assert_eq!(match_and_clip(word, sel), None);
+    }
+
+    #[test]
+    fn media_box_to_displayed_is_inverse_of_rect_to_media_box() {
+        // Round-trip: displayed → MediaBox → displayed must be identity for
+        // every rotation. `rect_to_media_box` takes displayed (top-down) →
+        // MediaBox y-up bottom-left+dims; `media_box_to_displayed` takes
+        // MediaBox y-up bottom-left+dims → displayed (top-down).
+        for &rotate in &[0, 90, 180, 270] {
+            let (mb_w, mb_h) = if rotate == 90 || rotate == 270 {
+                (200.0f32, 100.0f32)
+            } else {
+                (100.0f32, 200.0f32)
+            };
+            let disp = (13.0f32, 27.0f32, 41.0f32, 19.0f32);
+            let (px, py, pw, ph) =
+                rect_to_media_box(rotate, mb_w, mb_h, disp.0, disp.1, disp.2, disp.3);
+            let back = media_box_to_displayed(rotate, mb_w, mb_h, px, py, pw, ph);
+            assert!(
+                (back.0 - disp.0).abs() < 1e-3
+                    && (back.1 - disp.1).abs() < 1e-3
+                    && (back.2 - disp.2).abs() < 1e-3
+                    && (back.3 - disp.3).abs() < 1e-3,
+                "rotate={rotate}: round-trip mismatch got {back:?}, expected {disp:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rect_to_media_box_handles_all_rotations() {
+        // Unrotated 100x200 page (mb_w=100, mb_h=200). Rotated view
+        // dimensions differ per rotate but that's the caller's concern —
+        // this fn takes MediaBox dims directly.
+        // Redact at rotated-display (x=10, y=20, w=30, h=40).
+        assert_eq!(rect_to_media_box(0, 100.0, 200.0, 10.0, 20.0, 30.0, 40.0), (10.0, 140.0, 30.0, 40.0));
+        // /Rotate 90: swap axes, y_rd → x_mb, x_rd → y_mb.
+        assert_eq!(rect_to_media_box(90, 200.0, 100.0, 10.0, 20.0, 30.0, 40.0), (20.0, 10.0, 40.0, 30.0));
+        // /Rotate 180: flip x, keep y (in top-down / y-up terms this
+        // ends up as `(mb_w - x - w, y, w, h)`).
+        assert_eq!(rect_to_media_box(180, 100.0, 200.0, 10.0, 20.0, 30.0, 40.0), (60.0, 20.0, 30.0, 40.0));
+        // /Rotate 270: same axis swap as 90 but with both flips.
+        assert_eq!(rect_to_media_box(270, 200.0, 100.0, 10.0, 20.0, 30.0, 40.0), (140.0, 60.0, 40.0, 30.0));
+        // Any other rotate value falls back to /Rotate 0.
+        assert_eq!(rect_to_media_box(45, 100.0, 200.0, 10.0, 20.0, 30.0, 40.0), (10.0, 140.0, 30.0, 40.0));
+    }
 
     #[test]
     fn strip_output_suffix_recovers_base_name() {

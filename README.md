@@ -301,9 +301,11 @@ source PDF's existing resources. Save under a non-conflicting name.
   readers, because no `ToUnicode` CMap is generated for the embedded font.
   The text renders correctly visually. If extractable text matters for
   your downstream workflow, this is a real gap; let me know if you need it.
-- Page rotation (`/Rotate 90/180/270`) is not handled — overlays would land
-  in the pre-rotation coordinate space on rotated pages. Most signed PDFs
-  are upright; this hasn't bitten me yet.
+- Rotated pages (`/Rotate 90/180/270`): redactions land at the correct
+  position on the rotated view and save into the right MediaBox coordinates.
+  Text and image overlays on rotated pages still render horizontally in the
+  MediaBox frame (their position is right but the orientation is
+  pre-rotation) — pending a CTM-based fix.
 - No undo. Use Ctrl+D for "experimental moves" — duplicate first, drag the
   copy, delete one of them when done.
 - **Redactions are visual only.** A `b`-committed redaction is a black
@@ -312,6 +314,13 @@ source PDF's existing resources. Save under a non-conflicting name.
   `pdftotext` or copy-paste. If the redaction needs to survive a
   determined reader, rasterize the saved file afterwards (e.g.
   `pdftoppm` + `img2pdf`, or `qpdf --pages` piped through a rasterizer).
+- **OCR pages** (`OCRmyPDF` output and similar): mark mode still works but
+  the detected word rects are clipped to the drag rectangle because the
+  invisible OCR text uses advance-inflated char boxes rather than tight
+  glyph bounds — pdfium has no way to know the actual visible glyph size.
+  Effectively mark mode behaves like block mode on these pages. For clean
+  full-word marks on OCR content, drag a rect that fully covers the visible
+  text and rely on the clip.
 
 ## License
 
