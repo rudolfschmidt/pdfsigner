@@ -83,16 +83,7 @@ pub fn detect_text_lines(
     let Ok(text) = page.text() else { return vec![] };
     let frame = page_frame(&page);
     let mut out = vec![];
-    for_each_word(&text, |word_mb| {
-        let word_disp = media_box_to_displayed(
-            frame.rotate,
-            frame.mb_w,
-            frame.mb_h,
-            word_mb.0,
-            word_mb.1,
-            word_mb.2,
-            word_mb.3,
-        );
+    for_each_word(&text, &frame, |word_disp| {
         if let Some(hit) = match_and_clip(word_disp, rect) {
             out.push(hit);
         }
@@ -139,50 +130,62 @@ fn rotation_degrees(rot: pdfium_render::prelude::PdfPageRenderRotation) -> i32 {
 }
 
 /// Walk `text` in document order and emit one word rect per maximal run of
-/// consecutive non-whitespace glyphs on the same baseline. Emitted rects
-/// are `(left, bottom, width, height)` in MediaBox y-up. Whitespace glyphs
-/// and baseline jumps both break the current word.
+/// consecutive non-whitespace glyphs on the same visual line. Emitted rects
+/// are `(x, y, w, h)` in the *displayed* top-down frame (i.e. what the user
+/// sees on-screen), so the baseline check works on rotated pages too — a
+/// `/Rotate 90` page's chars share a common displayed-y even though their
+/// MediaBox y-up positions vary along y.
 ///
 /// pdfium exposes `text.segments()` which sounds like it does this, but its
 /// bounds include the phantom advance to the *next* segment — on
 /// column-aligned layouts (invoices, tables) that spans half a line.
-fn for_each_word(text: &PdfPageText, mut emit: impl FnMut((f32, f32, f32, f32))) {
+fn for_each_word(
+    text: &PdfPageText,
+    frame: &PageFrame,
+    mut emit: impl FnMut((f32, f32, f32, f32)),
+) {
+    // `current` accumulates the (left, top, right, bottom) bbox of the word
+    // being built, in displayed top-down coords.
     let mut current: Option<(f32, f32, f32, f32)> = None;
-    let close = |current: &mut Option<_>, emit: &mut dyn FnMut(_)| {
-        if let Some((l, b, r, t)) = current.take() {
-            emit((l, b, r - l, t - b));
-        }
-    };
     for c in text.chars().iter() {
         if c.unicode_char().is_some_and(|ch| ch.is_whitespace()) {
-            close(&mut current, &mut emit);
+            if let Some((l, t, r, b)) = current.take() {
+                emit((l, t, r - l, b - t));
+            }
             continue;
         }
-        let Ok(b) = c.tight_bounds() else { continue };
-        let (l, bt, r, t) = (b.left().value, b.bottom().value, b.right().value, b.top().value);
-        if r <= l || t <= bt {
+        let Ok(bounds) = c.tight_bounds() else { continue };
+        let (mb_l, mb_b) = (bounds.left().value, bounds.bottom().value);
+        let (mb_w_c, mb_h_c) = (bounds.width().value, bounds.height().value);
+        if mb_w_c <= 0.0 || mb_h_c <= 0.0 {
             continue;
         }
-        if let Some((_, prev_b, _, prev_t)) = current
-            && !on_same_baseline(prev_b, prev_t, bt, t)
+        let (dx, dy, dw, dh) =
+            media_box_to_displayed(frame.rotate, frame.mb_w, frame.mb_h, mb_l, mb_b, mb_w_c, mb_h_c);
+        let (l, t, r, b) = (dx, dy, dx + dw, dy + dh);
+        if let Some((_, prev_t, _, prev_b)) = current
+            && !on_same_baseline(prev_t, prev_b, t, b)
+            && let Some((cl, ct, cr, cb)) = current.take()
         {
-            close(&mut current, &mut emit);
+            emit((cl, ct, cr - cl, cb - ct));
         }
         current = Some(match current {
-            None => (l, bt, r, t),
-            Some((cl, cb, cr, ct)) => (cl.min(l), cb.min(bt), cr.max(r), ct.max(t)),
+            None => (l, t, r, b),
+            Some((cl, ct, cr, cb)) => (cl.min(l), ct.min(t), cr.max(r), cb.max(b)),
         });
     }
-    close(&mut current, &mut emit);
+    if let Some((l, t, r, b)) = current {
+        emit((l, t, r - l, b - t));
+    }
 }
 
-/// True if the new glyph (y-range `[bt, t]` in MediaBox y-up) sits on the
-/// same baseline as the current word (previous glyph `[prev_b, prev_t]`).
+/// True if the new glyph (displayed-y range `[t, b]`) sits on the same
+/// baseline as the current word (previous glyph `[prev_t, prev_b]`).
 /// Threshold is half the glyph height so multi-line jumps break the word
 /// even when the intervening whitespace char is missing.
-fn on_same_baseline(prev_b: f32, prev_t: f32, bt: f32, t: f32) -> bool {
-    let half_h = (prev_t - prev_b) * 0.5;
-    (bt - prev_b).abs() <= half_h && (t - prev_t).abs() <= half_h
+fn on_same_baseline(prev_t: f32, prev_b: f32, t: f32, b: f32) -> bool {
+    let half_h = (prev_b - prev_t) * 0.5;
+    (t - prev_t).abs() <= half_h && (b - prev_b).abs() <= half_h
 }
 
 /// Decide whether a word rect should be marked given the user's selection,
