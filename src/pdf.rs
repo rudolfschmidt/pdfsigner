@@ -340,6 +340,39 @@ fn read_page_rotate(doc: &Document, page_id: ObjectId) -> i32 {
     0
 }
 
+/// Read the effective `/MediaBox` for a page as `(x0, y0)` — the lower-left
+/// corner of the visible area in the PDF user-space coordinate system.
+/// Also inheritable through the `/Parent` chain. Returns `(0.0, 0.0)` if
+/// missing or malformed; that's the common case (~99% of PDFs).
+///
+/// A non-zero origin (e.g. `[0 7.83 595.5 850.08]`, common from some Canva
+/// exports) means the visible bottom-left sits at `(x0, y0)` in PDF space,
+/// not at `(0, 0)`. We must offset every emitted coordinate by this or the
+/// entire overlay layer drifts by that amount.
+fn read_page_media_box_origin(doc: &Document, page_id: ObjectId) -> (f32, f32) {
+    let mut cur = page_id;
+    for _ in 0..16 {
+        let Ok(obj) = doc.get_object(cur) else { return (0.0, 0.0) };
+        let Ok(dict) = obj.as_dict() else { return (0.0, 0.0) };
+        if let Ok(mb) = dict.get(b"MediaBox")
+            && let Ok(arr) = mb.as_array()
+            && arr.len() >= 2
+        {
+            let to_f32 = |o: &Object| -> f32 {
+                o.as_f32()
+                    .or_else(|_| o.as_i64().map(|n| n as f32))
+                    .unwrap_or(0.0)
+            };
+            return (to_f32(&arr[0]), to_f32(&arr[1]));
+        }
+        match dict.get(b"Parent") {
+            Ok(Object::Reference(r)) => cur = *r,
+            _ => return (0.0, 0.0),
+        }
+    }
+    (0.0, 0.0)
+}
+
 /// Transform a top-down `(x, y, w, h)` rectangle expressed in the *rotated
 /// display* frame into the `(px, py, pw, ph)` tuple to feed into a PDF
 /// `re` operator — i.e. bottom-left corner in the *unrotated* MediaBox
@@ -418,6 +451,7 @@ fn write_overlays_for_page(
     // redact rects transform cleanly and we map them into the unrotated
     // MediaBox frame before writing.
     let rotate = read_page_rotate(doc, page_id);
+    let (mb_x0, mb_y0) = read_page_media_box_origin(doc, page_id);
     let (rot_w, rot_h) = rotated_size_pt;
     let (mb_w, mb_h) = if rotate == 90 || rotate == 270 {
         (rot_h, rot_w)
@@ -442,11 +476,12 @@ fn write_overlays_for_page(
                 let img_id = embed_image(doc, &img)?;
                 let res_name = pick_free_name(&used_xobj, "Im");
                 used_xobj.push(res_name.as_bytes().to_vec());
-                let pdf_y = page_h_pt - y - h;
+                let pdf_x = mb_x0 + x;
+                let pdf_y = mb_y0 + page_h_pt - y - h;
                 content.extend_from_slice(
                     format!(
                         "q\n{:.4} 0 0 {:.4} {:.4} {:.4} cm\n/{} Do\nQ\n",
-                        w, h, x, pdf_y, res_name
+                        w, h, pdf_x, pdf_y, res_name
                     )
                     .as_bytes(),
                 );
@@ -458,7 +493,8 @@ fn write_overlays_for_page(
                 // (`TL` + `T*`) so multi-line text wraps exactly as the egui
                 // preview lays it out.
                 let baseline = y + size_pt * crate::theme::INTER_BASELINE_RATIO;
-                let pdf_y = page_h_pt - baseline;
+                let pdf_x = mb_x0 + x;
+                let pdf_y = mb_y0 + page_h_pt - baseline;
                 let leading = size_pt * crate::theme::INTER_LINE_HEIGHT_RATIO;
                 let r = color[0] as f32 / 255.0;
                 let g = color[1] as f32 / 255.0;
@@ -466,7 +502,7 @@ fn write_overlays_for_page(
                 content.extend_from_slice(
                     format!(
                         "BT\n/{} {:.4} Tf\n{:.4} TL\n{:.4} {:.4} {:.4} rg\n{:.4} {:.4} Td\n",
-                        font_name, size_pt, leading, r, g, b, x, pdf_y
+                        font_name, size_pt, leading, r, g, b, pdf_x, pdf_y
                     )
                     .as_bytes(),
                 );
@@ -483,8 +519,11 @@ fn write_overlays_for_page(
             Overlay::Redact { x, y, w, h } => {
                 // Rotated-display (top-down) → MediaBox y-up rectangle so
                 // `/Rotate 90/180/270` pages get the redaction bar at the
-                // same visual position the user marked.
+                // same visual position the user marked. Add the MediaBox
+                // origin so pages with a non-zero MediaBox lower-left
+                // (e.g. `[0 7.83 W H]`) don't shift the bar.
                 let (px, py, pw, ph) = rect_to_media_box(rotate, mb_w, mb_h, *x, *y, *w, *h);
+                let (px, py) = (px + mb_x0, py + mb_y0);
                 content.extend_from_slice(
                     format!(
                         "q\n0 0 0 rg\n{px:.4} {py:.4} {pw:.4} {ph:.4} re\nf\nQ\n",
